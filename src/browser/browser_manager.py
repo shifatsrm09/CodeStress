@@ -25,9 +25,13 @@ class BrowserManager:
 
     def launch(self, target_url: Optional[str] = None) -> bool:
         """
-        Launches a visible browser window (Edge or Chrome) and opens target_url.
+        Launches a visible browser window (Edge or Chrome) and opens target_url
+        with stealth options to enable OAuth/SSO logins without bot detection.
         """
         errors = []
+        profile_dir = os.path.abspath(os.path.join(".codestress", "browser_profile"))
+        os.makedirs(profile_dir, exist_ok=True)
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
 
         # 1. Try Microsoft Edge (standard on Windows)
         try:
@@ -35,13 +39,19 @@ class BrowserManager:
             edge_opts.add_argument("--start-maximized")
             edge_opts.add_argument("--disable-infobars")
             edge_opts.add_argument("--disable-extensions")
+            edge_opts.add_argument(f"--user-data-dir={profile_dir}")
+            edge_opts.add_argument("--disable-blink-features=AutomationControlled")
+            edge_opts.add_argument("--no-first-run")
+            edge_opts.add_argument("--no-default-browser-check")
+            edge_opts.add_argument(f"user-agent={user_agent}")
+            edge_opts.add_argument("--lang=en-US,en")
             edge_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             edge_opts.add_experimental_option("useAutomationExtension", False)
-            # Enable logging of browser console
             edge_opts.set_capability("goog:loggingPrefs", {"browser": "ALL"})
 
             self.driver = webdriver.Edge(options=edge_opts)
             self.browser_name = "Microsoft Edge"
+            self._apply_stealth_scripts()
         except Exception as e:
             errors.append(f"Edge launch failed: {e}")
 
@@ -52,12 +62,19 @@ class BrowserManager:
                 chrome_opts.add_argument("--start-maximized")
                 chrome_opts.add_argument("--disable-infobars")
                 chrome_opts.add_argument("--disable-extensions")
+                chrome_opts.add_argument(f"--user-data-dir={profile_dir}")
+                chrome_opts.add_argument("--disable-blink-features=AutomationControlled")
+                chrome_opts.add_argument("--no-first-run")
+                chrome_opts.add_argument("--no-default-browser-check")
+                chrome_opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+                chrome_opts.add_argument("--lang=en-US,en")
                 chrome_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
                 chrome_opts.add_experimental_option("useAutomationExtension", False)
                 chrome_opts.set_capability("goog:loggingPrefs", {"browser": "ALL"})
 
                 self.driver = webdriver.Chrome(options=chrome_opts)
                 self.browser_name = "Google Chrome"
+                self._apply_stealth_scripts()
             except Exception as e:
                 errors.append(f"Chrome launch failed: {e}")
 
@@ -71,6 +88,34 @@ class BrowserManager:
             self.navigate(target_url)
 
         return True
+
+    def _apply_stealth_scripts(self):
+        """Injects CDP scripts on every document load to neutralize automation signals."""
+        if not self.driver:
+            return
+        try:
+            stealth_js = """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            window.navigator.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+            """
+            self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": stealth_js
+            })
+        except Exception as e:
+            print(f"[WARN] Failed to inject stealth CDP scripts: {e}", file=sys.stderr)
 
     def navigate(self, url: str) -> bool:
         """Navigates to a specific URL."""
