@@ -27,7 +27,7 @@ program
   .option('--email <email>', 'Login email for credentialed testing')
   .option('--password <password>', 'Login password for credentialed testing')
   .option('--auth-id <code>', 'Single login ID, student ID, access code or username (e.g. 24101128)')
-  .option('--auth-login-path <path>', 'Exact login endpoint on the target', '/api/auth/login')
+  .option('--auth-login-path <path>', 'Exact login endpoint on the target (auto-discovered from source if omitted)')
   .option('--auth-id-field <field>', 'Override the automatically discovered login ID JSON field')
   .option('--auth-verify-path <path>', 'Protected current-user GET endpoint for session verification')
   .option('-o, --output <file>', 'Output report path', 'CODESTRESS.md')
@@ -87,12 +87,47 @@ program
         return;
       }
 
-      // Next stages will hook in here as we build them out
+      // Next stages hook in here
       console.log(chalk.cyan('Stage 0 completed successfully.'));
+
+      if (!['SUCCESS', 'PUBLIC'].includes(stage0Result.authResult.status)) {
+        console.log(chalk.yellow('Skipping attack: authentication was not verified.'));
+        return;
+      }
+
+      const { runAttack } = await import('../src/pipeline/stage3Attack.js');
+      const { writeReport } = await import('../src/pipeline/stage4Report.js');
+
+      console.log(chalk.bold.blue('\n[STAGE 3] Running adversarial tests...'));
+      const results = await runAttack({
+        target: stage0Result.target,
+        routes: stage0Result.codeAnalysis.routes,
+        session: stage0Result.session,
+        user: stage0Result.authResult.user,
+        onEvent: (e) => console.log(chalk.gray(`  → ${e.endpoint}`))
+      });
+
+      console.log(chalk.bold.blue('\n[STAGE 4] Generating report...'));
+      const path = await import('node:path');
+      const outPath = path.resolve(process.cwd(), options.output);
+      writeReport(outPath, {
+        target: stage0Result.target,
+        repo: options.repo,
+        authentication: stage0Result.authResult,
+        understanding: stage0Result.codeAnalysis,
+        results
+      });
+
+      const passed = results.filter(r => r.status === 'PASSED').length;
+      const failed = results.filter(r => r.status === 'FAILED').length;
+      const warned = results.filter(r => r.status === 'WARNING').length;
+      console.log(chalk.gray('━'.repeat(44)));
+      console.log(`Tests Run: ${results.length} | Passed: ${passed} | Failed: ${failed} | Warnings: ${warned}`);
+      console.log(chalk.green(`✓ Report saved → ${outPath}\n`));
     } catch (err) {
       console.error(chalk.bold.red('\n[FATAL ERROR]'), chalk.red(err.message));
       process.exit(1);
     }
-  });
+      });
 
 program.parse(process.argv);

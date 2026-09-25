@@ -23,6 +23,7 @@ export async function discoverAuthentication(options) {
       }
     }
   }
+  const loginCandidates = [];
   for (const file of files) {
     const routes = [...file.content.matchAll(/\b(app|router)\.(get|post)\s*\(\s*['"]([^'"]+)['"]/g)];
     for (let i = 0; i < routes.length; i++) {
@@ -31,20 +32,30 @@ export async function discoverAuthentication(options) {
       if (prefix === undefined) continue;
       const routePath = prefix + route[3];
       if (route[2] === 'get' && /\/(?:me|whoami|profile|session|current-user|current_user)$/i.test(routePath)) verificationPaths.push(routePath);
-      if (route[2] !== 'post' || routePath !== (options.authLoginPath || '/api/auth/login')) continue;
+      if (route[2] !== 'post') continue;
       const body = file.content.slice(route.index, routes[i + 1]?.index ?? file.content.length);
-      for (const match of body.matchAll(/\breq\.body\.([\w]+)|\breq\.body\[['"](\w+)['"]\]/g)) idFields.add(match[1] || match[2]);
+      const routeFields = new Set();
+      for (const match of body.matchAll(/\breq\.body\.([\w]+)|\breq\.body\[['"](\w+)['"]\]/g)) routeFields.add(match[1] || match[2]);
       for (const match of body.matchAll(/\{([^{}]+)\}\s*=\s*req\.body/g)) {
         for (const field of match[1].split(',')) {
           const name = field.trim().split(/[:=]/)[0].trim();
-          if (/^[a-zA-Z]\w*$/.test(name)) idFields.add(name);
+          if (/^[a-zA-Z]\w*$/.test(name)) routeFields.add(name);
         }
       }
+      const hasPassword = [...routeFields].some(f => /pass(word)?$/i.test(f));
+      const hasIdentifier = [...routeFields].some(f => /^(email|username|login|user(id)?|identifier)$/i.test(f));
+      const pathHints = /login|signin|sign-in|auth/i.test(routePath);
+      if (hasPassword && (hasIdentifier || pathHints)) {
+        loginCandidates.push({ path: routePath, strength: (pathHints ? 1 : 0) + (hasIdentifier ? 1 : 0) });
+      }
+      if (routePath === (options.authLoginPath || '/api/auth/login')) for (const field of routeFields) idFields.add(field);
     }
   }
+  loginCandidates.sort((a, b) => b.strength - a.strength);
   const candidates = [...idFields].filter(field => /^(?:studentId|loginId|userId|username|email|identifier|id)$/i.test(field));
   return {
     authIdField: candidates.length === 1 ? candidates[0] : idFields.size === 1 ? [...idFields][0] : undefined,
+    loginPath: loginCandidates[0]?.path,
     verificationPaths: [...new Set([...verificationPaths, '/api/auth/me', '/api/auth/session', '/api/users/me', '/api/me', '/auth/me', '/api/session', '/api/user', '/me'])].slice(0, 16)
   };
 }

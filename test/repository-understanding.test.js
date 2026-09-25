@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { RepositoryReader, parseRepository } from '../src/repo/repositoryReader.js';
+import { RouteScanner } from '../src/repo/routeScanner.js';
 import { Stage1Understand, sourceChunks } from '../src/pipeline/stage1Understand.js';
 
 async function fixture(run) {
@@ -73,6 +74,30 @@ test('source chunks preserve the end of large files and original line references
   const chunks = sourceChunks([{ path: 'large.js', content: 'x'.repeat(50000) + '\nEND_OF_SOURCE' }]);
   assert.ok(chunks.length > 1); assert.ok(chunks.at(-1).content.includes('2: END_OF_SOURCE'));
   assert.equal(chunks.reduce((sum, chunk) => sum + (chunk.content.match(/x/g) || []).length, 0), 50000);
+});
+
+test('route scanning includes destructured request body fields', () => {
+  const content = `app.post('/api/transfer', (req, res) => {
+    const { recipient, amount } = req.body || {};
+    res.json({ recipient, amount });
+  });`;
+  const route = new RouteScanner().extractFromCode(content, 'server.js').routes[0];
+  assert.deepEqual(route.parameters, [
+    { name: 'recipient', in: 'body' },
+    { name: 'amount', in: 'body' }
+  ]);
+});
+
+test('route scanning includes destructured request query fields', () => {
+  const content = `app.get('/api/transfer', (req, res) => {
+    const { recipient, amount } = req.query;
+    res.json({ recipient, amount });
+  });`;
+  const route = new RouteScanner().extractFromCode(content, 'server.js').routes[0];
+  assert.deepEqual(route.parameters, [
+    { name: 'recipient', in: 'query' },
+    { name: 'amount', in: 'query' }
+  ]);
 });
 
 test('read-only stage never calls AI; understanding sends actual source with file/line context', async () => fixture(async root => {

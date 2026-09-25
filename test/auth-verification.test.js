@@ -126,9 +126,10 @@ test('source discovery resolves mounted login fields without executing source', 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codestress-auth-'));
   try {
     await fs.writeFile(path.join(root, 'app.js'), `const authRoutes = require('./auth'); app.use('/api/auth', requireDatabase, authRoutes);`);
-    await fs.writeFile(path.join(root, 'auth.js'), `router.post('/login', (req, res) => { const { studentId } = req.body; }); router.get('/whoami', requireAuth, handler); throw new Error('Must never execute');`);
+    await fs.writeFile(path.join(root, 'auth.js'), `router.post('/login', (req, res) => { const { studentId, password } = req.body; }); router.get('/whoami', requireAuth, handler); throw new Error('Must never execute');`);
     const result = await discoverAuthentication({ repo: root });
     assert.equal(result.authIdField, 'studentId');
+    assert.equal(result.loginPath, '/api/auth/login');
     assert.equal(result.verificationPaths[0], '/api/auth/whoami');
   } finally {
     await fs.unlink(path.join(root, 'app.js'));

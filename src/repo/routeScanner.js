@@ -79,6 +79,25 @@ export class RouteScanner {
         });
       }
 
+      // Destructuring form: const { a, b } = req.body (very common; the
+      // req.body.x / req.body['x'] matches above miss this entirely)
+      for (const destructure of surroundingCode.matchAll(/\{([^{}]+)\}\s*=\s*req\.body/g)) {
+        for (const field of destructure[1].split(',')) {
+          const name = field.trim().split(/[:=]/)[0].trim();
+          if (/^[a-zA-Z_$][\w$]*$/.test(name) && !params.find(p => p.name === name)) {
+            params.push({ name, in: 'body' });
+          }
+        }
+      }
+      for (const destructure of surroundingCode.matchAll(/\{([^{}]+)\}\s*=\s*req\.query/g)) {
+        for (const field of destructure[1].split(',')) {
+          const name = field.trim().split(/[:=]/)[0].trim();
+          if (/^[a-zA-Z_$][\w$]*$/.test(name) && !params.find(p => p.name === name)) {
+            params.push({ name, in: 'query' });
+          }
+        }
+      }
+
       routes.push({
         method,
         path: endpoint,

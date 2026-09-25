@@ -90,7 +90,7 @@ export async function verifyAuthentication(options, http = axios) {
   let discovery;
   try { discovery = options.authPlan ? { authIdField: options.authPlan.idField, verificationPaths: options.authPlan.checks.map(check => check.path) } : await discoverAuthentication(options); }
   catch { return outcome('UNVERIFIED', 'Authentication discovery could not be completed.'); }
-  options = { ...options, authIdField: options.authIdField || discovery.authIdField, authLoginPath: options.authPlan?.loginPath || options.authLoginPath };
+  options = { ...options, authIdField: options.authIdField || discovery.authIdField, authLoginPath: options.authPlan?.loginPath || options.authLoginPath || discovery.loginPath || '/api/auth/login' };
   if (options.authPlan && ['Login ID', 'Credentials'].includes(type) && (options.authPlan.kind !== 'json-login' || !options.authLoginPath)) return outcome('UNVERIFIED', options.authPlan.kind === 'oauth' ? 'This app uses interactive OAuth. Supply the app session cookie or access token after signing in; Google consent or MFA cannot be completed from a repository alone.' : 'Source analysis did not identify a supported credential login. No login request was sent.');
   if (options.authPlan && !options.authPlan.checks.length) return outcome('UNVERIFIED', 'Source analysis did not produce a supported protected access check. No login request was sent.');
   if (type === 'Login ID' && !options.authIdField) return outcome('UNVERIFIED', 'Could not determine a unique login ID field from the repository. No login request was sent.');
