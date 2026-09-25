@@ -93,7 +93,9 @@ test('unified assessment runs browser automation pipeline and generates test rep
     launch: async () => ({ browser: 'MockBrowser', target: 'https://example.test' }),
     getSession: async () => ({ cookies: [{ name: 'app_session', value: 'valid', httpOnly: true, secure: true }], cookie_count: 1, storage: {} }),
     runTests: async () => ({ total: 5, passed: 5, vulnerable: 0, warnings: 0 }),
-    close: () => {}
+    close: () => {},
+    setIndicators: () => {},
+    checkAuth: async () => ({ authenticated: true, status: 'SIGNED_IN', cookies: [{ name: 'app_session', value: 'valid' }] })
   };
   const options = {
     target: 'https://example.test', repo: '.', repository, memory, ai,

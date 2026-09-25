@@ -1273,5 +1273,16 @@ input:focus,select:focus {
   line-height: 1.4;
 }
 
+.glow {
+  box-shadow: 0 0 16px rgba(100, 230, 160, 0.4);
+  border-color: #72ebb0 !important;
+  animation: pulse-glow 2s infinite ease-in-out;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 10px rgba(100, 230, 160, 0.3); }
+  50% { box-shadow: 0 0 20px rgba(100, 230, 160, 0.65); }
+}
+
 
 

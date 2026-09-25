@@ -77,6 +77,7 @@ export class Stage1Understand {
     this.ai = options.ai || new AIClient();
     this.emit = options.onEvent || (() => {});
     this.maxChunks = options.maxChunks ?? 256;
+    this.synthesizeReport = options.synthesizeReport !== false;
   }
 
   async ask(instruction, source) {
@@ -119,6 +120,8 @@ export class Stage1Understand {
   async condenseNotes(findings) {
     let notes = findings.map(chunk => `${chunk.path}:${chunk.startLine}-${chunk.endLine}\n${chunk.note}`).join('\n\n');
     for (let round = 0; notes.length > 12000 && round < 6; round++) {
+      const timeStr = new Date().toLocaleTimeString([], { hour12: false });
+      this.emit({ type: 'log', level: 'info', text: `[${timeStr}] Condensing notes for report synthesis (round ${round + 1}, ${Math.ceil(notes.length / 10000)} part(s))…` });
       const reduced = [];
       // Include all notes across bounded requests; never slice away the tail.
       for (let offset = 0; offset < notes.length; offset += 10000) {
@@ -154,7 +157,8 @@ export class Stage1Understand {
     const issues = [];
     let providerFailed = false;
     for (const [index, chunk] of chunks.slice(0, this.maxChunks).entries()) {
-      this.emit({ type: 'understanding_progress', current: index + 1, total: chunks.length, path: chunk.path });
+      const timeStr = new Date().toLocaleTimeString([], { hour12: false });
+      this.emit({ type: 'understanding_progress', current: index + 1, total: chunks.length, path: chunk.path, time: timeStr });
       result.aiCoverage.attemptedChunks++;
       try {
         if (await this.analyzeChunk(chunk, result)) {
@@ -177,12 +181,25 @@ export class Stage1Understand {
     if (result.analysisGaps.length) issues.push(`${result.analysisGaps.length} excerpt(s) remain incomplete. See the source findings and file coverage.`);
 
     const completeFindings = result.chunkNotes.filter(note => note.complete);
+
+    // Streamlined path: Codebase analysis for test planning without the heavy multi-minute essay synthesis
+    if (!this.synthesizeReport) {
+      const summarySnippets = completeFindings.slice(0, 8).map(f => `${f.path}:${f.startLine}: ${f.note}`).join('\n\n');
+      result.aiUnderstanding = summarySnippets
+        ? `Codebase security & route analysis complete (${completeFindings.length} findings, ${result.endpointsCount} routes discovered).\n\nKey architectural observations:\n${summarySnippets}`
+        : `Routes analyzed (${result.endpointsCount} endpoints mapped). Ready for live browser security testing.`;
+      result.aiStatus = result.chunkNotes.length ? 'complete' : 'partial';
+      result.inventory = result.inventory.map(file => ({ ...file, aiAnalyzed: file.status === 'read' && completed.get(file.path) === perFile.get(file.path) }));
+      return result;
+    }
+
     if (completeFindings.length && !providerFailed) {
       try {
         const notes = await this.condenseNotes(completeFindings);
         const context = JSON.stringify({ readCoverage: repository.coverage, aiCoverage: result.aiCoverage, notes });
         for (const [title, instruction] of REPORT_SECTIONS) {
-          this.emit({ type: 'log', level: 'info', text: `Writing report: ${title}…` });
+          const timeStr = new Date().toLocaleTimeString([], { hour12: false });
+          this.emit({ type: 'log', level: 'info', text: `[${timeStr}] Writing report: ${title}…` });
           try {
             const text = await this.ask(`${instruction} Write only this report section in at most 400 words. Cite file:line evidence. Use only provided findings, distinguish facts from inference, and reflect partial coverage.`, context);
             result.reportSections.push({ title, text, complete: true });

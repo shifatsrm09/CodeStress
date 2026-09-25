@@ -44,6 +44,11 @@ export class SeleniumBridge extends EventEmitter {
               const event = JSON.parse(trimmed.replace('__CODESTRESS_EVENT__', ''));
               this.emit('event', event);
 
+              if (event.type === 'auth_state_changed') {
+                this.currentAuthState = event.data;
+                this.emit('auth_state_changed', event.data);
+              }
+
               if (event.type === 'browser_ready' && !initResolved) {
                 initResolved = true;
                 this.browserReady = true;
@@ -116,6 +121,48 @@ export class SeleniumBridge extends EventEmitter {
         this.off('event', handler);
         resolve({ cookies: [], storage: {} });
       }, 5000);
+    });
+  }
+
+  /**
+   * Updates candidate authentication indicators (routes, cookies) in Python monitor.
+   */
+  setIndicators(indicators) {
+    if (this.process && this.browserReady) {
+      try {
+        this.process.stdin.write(JSON.stringify({ cmd: 'set_indicators', indicators }) + '\n');
+      } catch (e) {}
+    }
+  }
+
+  /**
+   * Queries the latest evaluation from the Python authentication monitor.
+   */
+  checkAuth() {
+    return new Promise((resolve) => {
+      if (!this.process || !this.browserReady) {
+        return resolve(this.currentAuthState || { authenticated: false, status: 'PENDING' });
+      }
+
+      const handler = (event) => {
+        if (event.type === 'auth_state_changed') {
+          this.off('event', handler);
+          resolve(event.data);
+        }
+      };
+
+      this.on('event', handler);
+      try {
+        this.process.stdin.write(JSON.stringify({ cmd: 'check_auth' }) + '\n');
+      } catch (e) {
+        this.off('event', handler);
+        return resolve(this.currentAuthState || { authenticated: false, status: 'PENDING' });
+      }
+
+      setTimeout(() => {
+        this.off('event', handler);
+        resolve(this.currentAuthState || { authenticated: false, status: 'PENDING' });
+      }, 3000);
     });
   }
 

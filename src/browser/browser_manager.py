@@ -127,6 +127,176 @@ class BrowserManager:
         except Exception:
             return []
 
+    def check_auth_state(self, candidate_indicators: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Actively inspects current browser state for reliable authentication indicators.
+        Returns dict with:
+          authenticated: bool
+          status: "SIGNED_IN" | "PENDING"
+          url: str
+          indicators: List[str]
+          cookie_count: int
+          cookies: List[Dict[str, Any]]
+          storage: Dict[str, Any]
+        """
+        if not self.driver:
+            return {
+                "authenticated": False,
+                "status": "PENDING",
+                "url": "",
+                "indicators": [],
+                "cookie_count": 0,
+                "cookies": [],
+                "storage": {}
+            }
+
+        url = self.get_current_url()
+        cookies = self.get_cookies()
+        storage = self.get_storage_data()
+        indicators = []
+
+        # 1. Cookie Heuristics
+        auth_cookie_patterns = (
+            "session", "token", "auth", "sid", "jwt", "login", "user",
+            "logged_in", "connect.sid", "phpsessid", "jsessionid",
+            "laravel_session", "excela_session", "app_session", "__secure-",
+            "_session", "remember_web", "user_session", "cfat_session"
+        )
+        detected_auth_cookies = []
+        for c in cookies:
+            name_lower = c.get("name", "").lower()
+            val = str(c.get("value", ""))
+            # Must be a substantial value not equal to common empty indicators
+            if any(pat in name_lower for pat in auth_cookie_patterns):
+                if len(val) >= 6 and val.lower() not in ("deleted", "null", "false", "0", "undefined", "none"):
+                    detected_auth_cookies.append(c["name"])
+
+        if detected_auth_cookies:
+            indicators.append(f"Active session cookie(s) detected: {', '.join(detected_auth_cookies[:3])}")
+
+        # 2. Local/Session Storage Heuristics
+        storage_auth_keys = []
+        for store_name in ("localStorage", "sessionStorage"):
+            store = storage.get(store_name, {})
+            if isinstance(store, dict):
+                for k, v in store.items():
+                    k_lower = k.lower()
+                    if any(pat in k_lower for pat in ("token", "auth", "user", "jwt", "profile", "session", "access_token", "id_token")):
+                        if v and str(v).lower() not in ("null", "undefined", "", "{}"):
+                            storage_auth_keys.append(f"{store_name}.{k}")
+
+        if storage_auth_keys:
+            indicators.append(f"Client storage credential(s): {', '.join(storage_auth_keys[:2])}")
+
+        # 3. DOM Heuristics via JavaScript
+        dom_signals = {}
+        try:
+            dom_script = """
+            return (function() {
+                var signals = [];
+                var hasLogout = false;
+                var hasProfile = false;
+                var hasPassword = false;
+
+                // Logout/sign-out buttons or links
+                var logoutSelectors = [
+                    "a[href*='logout']", "a[href*='signout']", "a[href*='log-out']", "a[href*='sign-out']",
+                    "button[id*='logout']", "button[name*='logout']", "button[id*='signout']",
+                    "[aria-label*='logout' i]", "[aria-label*='sign out' i]", "[data-testid*='logout' i]"
+                ];
+                for (var i = 0; i < logoutSelectors.length; i++) {
+                    if (document.querySelector(logoutSelectors[i])) {
+                        hasLogout = true;
+                        signals.push("Logout control found in page");
+                        break;
+                    }
+                }
+                if (!hasLogout) {
+                    var clickables = document.querySelectorAll("button, a, [role='button'], span");
+                    for (var j = 0; j < clickables.length; j++) {
+                        var txt = (clickables[j].textContent || '').trim().toLowerCase();
+                        if (txt === 'log out' || txt === 'sign out' || txt === 'logout' || txt === 'signout') {
+                            hasLogout = true;
+                            signals.push("Sign-out button text ('" + txt + "') detected");
+                            break;
+                        }
+                    }
+                }
+
+                // Profile / Avatar elements
+                var profileSelectors = [
+                    "[class*='avatar']", "[class*='profile']", "[id*='profile']",
+                    "[aria-label*='account' i]", "[aria-label*='user menu' i]", "[data-testid*='user-avatar']"
+                ];
+                for (var k = 0; k < profileSelectors.length; k++) {
+                    if (document.querySelector(profileSelectors[k])) {
+                        hasProfile = true;
+                        signals.push("Profile/avatar element found in page");
+                        break;
+                    }
+                }
+
+                if (document.querySelector("input[type='password']")) {
+                    hasPassword = true;
+                }
+
+                return {
+                    hasLogout: hasLogout,
+                    hasProfile: hasProfile,
+                    hasPassword: hasPassword,
+                    signals: signals
+                };
+            })();
+            """
+            dom_signals = self.driver.execute_script(dom_script) or {}
+            indicators.extend(dom_signals.get("signals", []))
+        except Exception:
+            pass
+
+        # 4. URL / Route Heuristics
+        url_lower = url.lower()
+        is_login_url = any(x in url_lower for x in ("/login", "/signin", "/auth/login", "/users/sign_in", "oauth/authorize"))
+        is_app_url = any(x in url_lower for x in ("/dashboard", "/home", "/app", "/admin", "/workspace", "/profile", "/settings", "/overview", "/courses"))
+
+        if is_app_url and not dom_signals.get("hasPassword", False):
+            indicators.append(f"Navigated to application view: {url}")
+
+        # Check candidate indicators from codebase (if provided)
+        if candidate_indicators and isinstance(candidate_indicators, dict):
+            protected_routes = candidate_indicators.get("protected_routes", [])
+            for pr in protected_routes:
+                if pr and pr != "/" and pr.lower() in url_lower:
+                    indicators.append(f"Current route matches codebase protected endpoint: {pr}")
+                    break
+
+        # Authentication evaluation:
+        # True if:
+        # - Has logout/signout button or link, OR
+        # - Has active auth cookie and NOT currently on an unauthenticated login page with password field, OR
+        # - Has client storage token, OR
+        # - Navigated to dashboard/app URL without password field
+        is_authenticated = False
+        if dom_signals.get("hasLogout", False):
+            is_authenticated = True
+        elif detected_auth_cookies and not (is_login_url and dom_signals.get("hasPassword", False)):
+            is_authenticated = True
+        elif storage_auth_keys and not (is_login_url and dom_signals.get("hasPassword", False)):
+            is_authenticated = True
+        elif is_app_url and not dom_signals.get("hasPassword", False):
+            is_authenticated = True
+
+        status = "SIGNED_IN" if is_authenticated else "PENDING"
+
+        return {
+            "authenticated": is_authenticated,
+            "status": status,
+            "url": url,
+            "indicators": indicators,
+            "cookie_count": len(cookies),
+            "cookies": cookies,
+            "storage": storage
+        }
+
     def take_screenshot(self, filepath: str) -> bool:
         """Saves a screenshot to the specified path."""
         if not self.driver:

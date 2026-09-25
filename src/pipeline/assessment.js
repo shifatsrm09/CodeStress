@@ -55,12 +55,46 @@ export class Assessment {
 
     // Launch visible Python Selenium browser
     this.phase('browser_launch', 'Launching interactive browser window for manual authentication');
-    this.emit({ type: 'log', level: 'info', text: `Opening real browser pointing to ${target.href}...` });
+    const launchTime = new Date().toLocaleTimeString([], { hour12: false });
+    this.emit({ type: 'log', level: 'info', text: `[${launchTime}] Opening interactive browser pointing to ${target.href}...` });
+
+    this.authenticated = false;
+    this.codebaseComplete = false;
+    this.latestAuthState = null;
 
     // Hook selenium events into assessment emitter
     this.selenium.on('event', event => {
       this.emit(event);
-      if (event.type === 'test_start') {
+
+      if (event.type === 'auth_state_changed') {
+        const authData = event.data;
+        this.latestAuthState = authData;
+
+        if (authData.authenticated) {
+          this.authenticated = true;
+          const time = new Date().toLocaleTimeString([], { hour12: false });
+          const indText = (authData.indicators || []).join(' · ');
+          this.emit({
+            type: 'authentication_result',
+            data: {
+              status: 'SUCCESS',
+              authenticated: true,
+              type: 'Interactive Browser Session',
+              detail: indText ? `Signed in · ${indText}` : 'Signed in · Active authenticated session detected.',
+              evidence: (authData.cookies || []).map(c => ({
+                step: 'Active Session Cookie',
+                endpoint: `${c.name} (${c.httpOnly ? 'HttpOnly' : 'Accessible'}, ${c.secure ? 'Secure' : 'Insecure'})`,
+                httpStatus: 200
+              }))
+            }
+          });
+          this.emit({
+            type: 'log',
+            level: 'success',
+            text: `[${time}] Authentication verified in browser: ${indText || 'Active session detected'}`
+          });
+        }
+      } else if (event.type === 'test_start') {
         this.emit({ type: 'log', level: 'info', text: `[TEST ${event.data.index}/${event.data.total}] ${event.data.name} (${event.data.category})` });
       } else if (event.type === 'test_result') {
         const level = event.data.status === 'PASSED' ? 'success' : event.data.status === 'VULNERABLE' ? 'error' : 'warn';
@@ -72,13 +106,15 @@ export class Assessment {
     try {
       browserInfo = await this.selenium.launch(target.href);
       this.emit({ type: 'browser_ready', data: browserInfo });
-      this.emit({ type: 'log', level: 'success', text: `Browser ready: ${browserInfo.browser}. Pointed to ${browserInfo.target}` });
+      const readyTime = new Date().toLocaleTimeString([], { hour12: false });
+      this.emit({ type: 'log', level: 'success', text: `[${readyTime}] Browser ready: ${browserInfo.browser}. Pointed to ${browserInfo.target}` });
     } catch (browserErr) {
-      this.emit({ type: 'log', level: 'warn', text: `Selenium launch warning: ${browserErr.message}. Continuing with API analysis.` });
+      this.emit({ type: 'log', level: 'warn', text: `Selenium launch warning: ${browserErr.message}. Continuing with analysis.` });
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // STEP 2 — READ CODEBASE & AI UNDERSTANDING
+    // (Runs concurrently while user can freely interact with the open browser)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     this.phase('reading', 'Reading and analyzing codebase structure');
     const previous = await memory.load();
@@ -112,39 +148,66 @@ export class Assessment {
     };
     this.emit({ type: 'repository_read', data: routeSnapshot });
 
-    // AI codebase understanding across all routes & logic
+    // Share discovered routes with Python Selenium auth monitor
+    if (this.selenium.setIndicators) {
+      this.selenium.setIndicators({
+        protected_routes: analysis.routes.filter(r => (r.middlewares || []).some(m => /auth|login|protect|admin/i.test(m))).map(r => r.path)
+      });
+    }
+
+    // Streamlined AI codebase understanding (synthesizeReport: false skips the 6-minute pre-test essay delay)
     this.phase('understanding', `AI analyzing application architecture & security attack surfaces`);
     let report;
     try {
       report = await new Stage1Understand({
-        repository, ai: this.ai, cachedNotes, onEvent: this.emit,
+        repository, ai: this.ai, cachedNotes, synthesizeReport: false, onEvent: this.emit,
         onCheckpoint: result => memory.save({ notes: result.chunkNotes, report: result, fingerprint, status: 'understanding' })
       }).execute();
       await memory.save({ report, notes: report.chunkNotes, fingerprint, status: 'understood' });
       this.emit({ type: 'understanding_ready', data: report });
     } catch (e) {
       report = routeSnapshot;
-      this.emit({ type: 'log', level: 'warn', text: `AI understanding limited: ${e.message}. Using heuristic scanner routes.` });
+      this.emit({ type: 'log', level: 'warn', text: `AI understanding note: ${e.message}. Using heuristic scanner routes.` });
+    }
+    this.codebaseComplete = true;
+
+    // Check latest auth state from browser
+    if (this.selenium.checkAuth) {
+      try {
+        const latest = await this.selenium.checkAuth();
+        if (latest && latest.authenticated) {
+          this.authenticated = true;
+          this.latestAuthState = latest;
+        }
+      } catch (e) {}
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 3 — MANUAL AUTHENTICATION GATE
+    // STEP 3 — AUTHENTICATION CHECK & START TESTS GATE
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    this.phase('waiting_auth', 'Browser open · please complete manual login/MFA');
-    this.emit({
-      type: 'authentication_result',
-      data: {
-        status: 'PENDING',
-        authenticated: false,
-        type: 'Interactive Browser Session',
-        detail: 'Browser is open. Complete authentication (Google OAuth, SSO, MFA, or credentials) in the browser window, then click Start Running Tests.'
-      }
-    });
+    this.phase('waiting_auth', this.authenticated
+      ? 'Authentication verified · Ready to start tests'
+      : 'Browser open · please complete manual login/MFA');
+
+    if (!this.authenticated) {
+      this.emit({
+        type: 'authentication_result',
+        data: {
+          status: 'PENDING',
+          authenticated: false,
+          type: 'Interactive Browser Session',
+          detail: 'Browser is open. Complete authentication (Google OAuth, SSO, MFA, or credentials) in the browser window, then click Start Running Tests.'
+        }
+      });
+    }
 
     const proceedWithTests = await this.onUserPrompt({
       type: 'user_prompt',
       prompt: 'Start Running Tests',
-      detail: 'The browser is open with your target. Once you have logged in, click to run AI-generated security and functionality tests live in the browser.',
+      detail: this.authenticated
+        ? 'Authentication confirmed in browser. Click to run AI-generated security and functionality tests live in the browser.'
+        : 'The browser is open with your target. Complete login in the browser, then click to run security tests.',
+      authenticated: this.authenticated,
       browser: browserInfo?.browser || 'Browser',
       endpointsDiscovered: routeSnapshot.endpointsCount
     });
@@ -155,6 +218,28 @@ export class Assessment {
       return { reachable: true, report, status: 'canceled' };
     }
 
+    // Final auth state check before generating and running tests
+    const sessionData = await this.selenium.getSession();
+    const hasCookies = sessionData.cookies && sessionData.cookies.length > 0;
+    const isAuthed = this.authenticated || sessionData.authenticated || hasCookies;
+
+    this.emit({
+      type: 'authentication_result',
+      data: {
+        status: isAuthed ? 'SUCCESS' : 'PUBLIC',
+        authenticated: isAuthed,
+        type: 'Browser Session',
+        detail: isAuthed
+          ? `Signed in · Authenticated session active (${sessionData.cookie_count || 1} cookie(s) detected). Running tests with live session.`
+          : 'Testing under current browser state.',
+        evidence: (sessionData.cookies || []).map(c => ({
+          step: 'Active Cookie',
+          endpoint: `${c.name} (${c.httpOnly ? 'HttpOnly' : 'Accessible'}, ${c.secure ? 'Secure' : 'Insecure'})`,
+          httpStatus: 200
+        }))
+      }
+    });
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // STEP 4 — DYNAMIC TEST SCENARIO GENERATION
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -163,26 +248,6 @@ export class Assessment {
 
     const scenarios = await this.scenarioGen.generateScenarios(report || routeSnapshot, target.href);
     this.emit({ type: 'log', level: 'info', text: `Formulated ${scenarios.length} test scenarios. Starting live execution in browser...` });
-
-    // Inspect session cookies captured from browser
-    const sessionData = await this.selenium.getSession();
-    const hasCookies = sessionData.cookies && sessionData.cookies.length > 0;
-    this.emit({
-      type: 'authentication_result',
-      data: {
-        status: hasCookies ? 'SUCCESS' : 'PUBLIC',
-        authenticated: hasCookies,
-        type: 'Browser Session',
-        detail: hasCookies
-          ? `Authenticated session active (${sessionData.cookie_count} cookie(s) detected). Running tests with your live session.`
-          : 'Testing under current browser state.',
-        evidence: (sessionData.cookies || []).map(c => ({
-          step: 'Cookie Detected',
-          endpoint: `${c.name} (${c.httpOnly ? 'HttpOnly' : 'Accessible'}, ${c.secure ? 'Secure' : 'Insecure'})`,
-          httpStatus: 200
-        }))
-      }
-    });
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // STEP 5 — LIVE SELENIUM TEST EXECUTION
@@ -214,6 +279,7 @@ export class Assessment {
       status: 'complete'
     };
 
+    await memory.save({ status: 'complete', testSummary: testRunResult || null });
     this.emit({ type: 'assessment_complete', data: result });
     return result;
   }

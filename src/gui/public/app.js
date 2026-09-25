@@ -121,6 +121,14 @@ function fail(message) {
 
 function handleStreamEvent(event) {
   if (event.type === 'authentication_result') renderAuthentication(event.data);
+  if (event.type === 'auth_state_changed' && event.data) {
+    renderAuthentication({
+      status: event.data.authenticated ? 'SUCCESS' : 'PENDING',
+      authenticated: event.data.authenticated,
+      detail: event.data.indicators?.length ? `Signed in · ${event.data.indicators.join(' · ')}` : (event.data.authenticated ? 'Signed in · Active session detected' : 'Waiting for login in browser'),
+      evidence: (event.data.cookies || []).map(c => ({ step: 'Cookie Active', endpoint: `${c.name} (${c.httpOnly ? 'HttpOnly' : 'Accessible'}, ${c.secure ? 'Secure' : 'Insecure'})` }))
+    });
+  }
   if (event.type === 'target_reachable') {
     $('statStatus').textContent = 'Reachable'; $('statStatus').className = 'success';
     $('statStatusDetails').textContent = `HTTP ${event.status}`;
@@ -130,8 +138,9 @@ function handleStreamEvent(event) {
     appendLog(`[BROWSER LAUNCHED] ${event.data.browser} open at ${event.data.target}`, 'success');
   }
   if (event.type === 'test_start') {
-    setRunning(true, `Test ${event.data.index}/${event.data.total}`);
-    appendLog(`[TEST ${event.data.index}/${event.data.total}] ${event.data.name} (${event.data.category})`, 'info');
+    setRunning(true, `Running: ${event.data.name}`);
+    $('phaseStatus').textContent = `● Running: ${event.data.name}`;
+    appendLog(`● Running: ${event.data.name} (${event.data.category})`, 'info');
   }
   if (event.type === 'test_result') {
     const level = event.data.status === 'PASSED' ? 'success' : event.data.status === 'VULNERABLE' ? 'error' : 'warn';
@@ -158,10 +167,13 @@ function handleStreamEvent(event) {
   if (event.type === 'user_prompt') {
     $('userPromptBox').hidden = false;
     $('promptTitle').textContent = event.prompt || 'Start Running Tests?';
-    $('promptDetail').textContent = event.detail || 'The browser is open with your target. Complete sign-in in the browser window, then click Start Running Tests.';
-    $('phaseStatus').textContent = 'Browser open · waiting for sign-in…';
+    const isAuthed = lastAuthResult && lastAuthResult.authenticated;
+    $('promptDetail').textContent = isAuthed
+      ? '✓ Authentication detected in browser! Click below to execute live browser security tests.'
+      : (event.detail || 'Please complete login/MFA in the Selenium browser. Once logged in, click Start Running Tests.');
+    $('phaseStatus').textContent = isAuthed ? 'Ready to run tests' : 'Browser open · waiting for sign-in…';
     $('runState').textContent = 'Action required';
-    appendLog(`[ACTION REQUIRED] ${event.prompt}: ${event.detail}`, 'warn');
+    appendLog(`[ACTION REQUIRED] ${event.prompt}: ${$('promptDetail').textContent}`, 'warn');
   }
   if (event.type === 'understanding_coverage' && sourceReport) {
     sourceReport.aiCoverage = event.data; updateCoverageText(sourceReport);
@@ -338,15 +350,15 @@ function renderFindings(data) {
 
 function renderAuthentication(result) {
   lastAuthResult = result;
-  const verified = result.status === 'SUCCESS' && result.authenticated === true;
+  const verified = (result.status === 'SUCCESS' || result.status === 'SIGNED_IN') && result.authenticated === true;
   const isPending = result.status === 'PENDING';
   const publicMode = result.status === 'PUBLIC';
   const isFailed = result.status === 'FAILED';
 
-  $('statAuth').textContent = isPending ? 'Sign in' : publicMode ? 'Public' : verified ? 'SUCCESS' : isFailed ? 'FAILED' : 'Unverified';
+  $('statAuth').textContent = verified ? '✓ Signed in' : isPending ? '◇ Pending' : publicMode ? 'Public' : isFailed ? 'Rejected ✗' : 'Unverified';
   $('statAuth').className = verified ? 'success' : isFailed ? 'error-text' : isPending ? 'warn' : '';
 
-  let detail = result.detail || (publicMode ? 'Testing under public browser state.' : 'Session verification active.');
+  let detail = result.detail || (verified ? 'Active authenticated session detected.' : isPending ? 'Please complete login/MFA in the Selenium browser.' : 'Testing under current browser state.');
   if (result.user) {
     const idVal = result.user.studentId || result.user.id || result.user.username || result.user.email || '';
     if (idVal) {
@@ -354,11 +366,21 @@ function renderAuthentication(result) {
     }
   }
 
-  $('statAuthDetails').textContent = isPending ? 'Waiting for sign-in in browser' : publicMode ? detail : (verified ? 'Session verified ✓' : isFailed ? 'Rejected ✗' : 'Session active');
+  $('statAuthDetails').textContent = verified ? 'Session verified ✓' : isPending ? 'Please complete login/MFA in browser' : detail;
   $('authEvidence').hidden = !result.evidence || !result.evidence.length;
   $('authEvidenceDetail').textContent = detail;
   $('authEvidenceList').replaceChildren();
   for (const check of result.evidence || []) {
     const row = document.createElement('li'); row.textContent = `${check.step}: ${check.endpoint}`; $('authEvidenceList').append(row);
+  }
+
+  // Dynamically update prompt box if open
+  if (!$('userPromptBox').hidden) {
+    if (verified) {
+      $('promptDetail').textContent = '✓ Authentication detected in browser! Ready to run security tests.';
+      $('btnPromptProceed').classList.add('glow');
+    } else {
+      $('promptDetail').textContent = 'Please complete login/MFA in the Selenium browser. Once logged in, click Start Running Tests.';
+    }
   }
 }
