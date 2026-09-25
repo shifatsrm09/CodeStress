@@ -1208,3 +1208,70 @@ input:focus,select:focus {
   color: #cdded3;
 }
 
+.report-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.report-markdown {
+  white-space: pre-wrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: #cfdad3;
+  background: #111a15;
+  padding: 20px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.tab-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #257849;
+  color: #e3faec;
+  margin-left: 6px;
+}
+
+.browser-auth-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #141f19;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-top: 4px;
+}
+
+.browser-auth-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.browser-auth-info strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: #c4efd4;
+}
+
+.browser-auth-info small {
+  display: block;
+  font-size: 13px;
+  color: #8c9b91;
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+
+

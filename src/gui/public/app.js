@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 let routes = [], eventCount = 0, running = false, streamReady = false, toastTimer;
 let sourceReport = null;
 let lastAuthResult = null;
-const tabs = ['Activity', 'Routes', 'Summary', 'Files'];
+const tabs = ['Activity', 'Routes', 'Summary', 'Files', 'Report'];
 
 async function apiRequest(endpoint, options = {}) {
   let response;
@@ -47,15 +47,7 @@ tabs.forEach((name, index) => {
 $('navRoutes').addEventListener('click', () => selectTab('Routes'));
 $('navActivity').addEventListener('click', () => selectTab('Activity'));
 
-const authGroups = { authId: 'groupAuthId', bearer: 'groupBearer', cookie: 'groupCookie', credentials: 'groupCredentials' };
-$('authType').addEventListener('change', () => {
-  Object.entries(authGroups).forEach(([mode, id]) => {
-    $(id).hidden = mode !== $('authType').value;
-    $(id).querySelectorAll('input').forEach(input => { input.required = !$(id).hidden; input.disabled = $(id).hidden; });
-  });
-  $('authHint').textContent = $('authType').value === 'none' ? 'Assess publicly accessible routes.' : 'Use a test account for authenticated access.';
-});
-$('authType').dispatchEvent(new Event('change'));
+
 
 function toast(message) {
   $('toast').textContent = message; $('toast').hidden = false;
@@ -102,6 +94,8 @@ $('routeSearch').addEventListener('input', renderRoutes);
 function resetResults() {
   lastAuthResult = null; $('authEvidence').hidden = true;
   $('userPromptBox').hidden = true;
+  $('reportBadge').hidden = true;
+  $('reportContent').textContent = 'Run testing to generate your security assessment report.';
   sourceReport = null; $('aiFindings').replaceChildren(); $('testCommands').replaceChildren();
   $('fileInventory').replaceChildren(); $('coverageText').textContent = 'Waiting for source reading…';
   $('btnDownload').disabled = true;
@@ -131,6 +125,30 @@ function handleStreamEvent(event) {
     $('statStatus').textContent = 'Reachable'; $('statStatus').className = 'success';
     $('statStatusDetails').textContent = `HTTP ${event.status}`;
   }
+  if (event.type === 'browser_ready') {
+    $('statStatusDetails').textContent = `${event.data.browser} Active`;
+    appendLog(`[BROWSER LAUNCHED] ${event.data.browser} open at ${event.data.target}`, 'success');
+  }
+  if (event.type === 'test_start') {
+    setRunning(true, `Test ${event.data.index}/${event.data.total}`);
+    appendLog(`[TEST ${event.data.index}/${event.data.total}] ${event.data.name} (${event.data.category})`, 'info');
+  }
+  if (event.type === 'test_result') {
+    const level = event.data.status === 'PASSED' ? 'success' : event.data.status === 'VULNERABLE' ? 'error' : 'warn';
+    appendLog(`  ↳ ${event.data.status}: ${event.data.details}`, level);
+  }
+  if (event.type === 'suite_complete') {
+    appendLog(`[SUITE COMPLETE] ${event.data.total} tests executed. Passed: ${event.data.passed}, Issues: ${event.data.issues}`, event.data.issues ? 'warn' : 'success');
+  }
+  if (event.type === 'report_ready') {
+    $('reportBadge').hidden = false;
+    appendLog(`[REPORT READY] report.md compiled (${event.data.total_tests} tests, ${event.data.issues} issues)`, 'success');
+    fetch('/api/report').then(r => r.text()).then(text => {
+      $('reportContent').textContent = text;
+      selectTab('Report');
+      toast('Security report generated');
+    }).catch(() => {});
+  }
   if (event.type === 'memory_status') $('memoryStatus').textContent = event.text;
   if (event.type === 'assessment_phase') {
     $('phaseStatus').textContent = event.text;
@@ -139,11 +157,11 @@ function handleStreamEvent(event) {
   }
   if (event.type === 'user_prompt') {
     $('userPromptBox').hidden = false;
-    $('promptTitle').textContent = event.prompt || 'Read full codebase?';
-    $('promptDetail').textContent = event.detail || 'Authentication complete. Proceed with deep AI analysis across all routes and logic?';
-    $('phaseStatus').textContent = 'Waiting for user confirmation…';
+    $('promptTitle').textContent = event.prompt || 'Start Running Tests?';
+    $('promptDetail').textContent = event.detail || 'The browser is open with your target. Complete sign-in in the browser window, then click Start Running Tests.';
+    $('phaseStatus').textContent = 'Browser open · waiting for sign-in…';
     $('runState').textContent = 'Action required';
-    appendLog(`[PROMPT] ${event.prompt}: ${event.detail}`, 'warn');
+    appendLog(`[ACTION REQUIRED] ${event.prompt}: ${event.detail}`, 'warn');
   }
   if (event.type === 'understanding_coverage' && sourceReport) {
     sourceReport.aiCoverage = event.data; updateCoverageText(sourceReport);
@@ -163,25 +181,27 @@ function handleStreamEvent(event) {
     const data = event.data;
     if (data.report) renderSourceReport(data.report, true);
     if (data.authentication) renderAuthentication(data.authentication);
-    $('statStatus').textContent = 'Reachable'; $('statStatus').className = 'success';
-    $('statStatusDetails').textContent = data.report?.aiStatus ? `AI understanding: ${data.report.aiStatus}` : 'Done';
-    const complete = data.status === 'complete' || data.status === 'auth_only';
-    setRunning(false, complete ? 'Complete' : 'Needs attention');
-    $('phaseStatus').textContent = complete ? 'Assessment finished' : 'Assessment completed with findings';
-    if (data.memory) {
-      $('memoryStatus').textContent = `Saved locally · ${data.memory.reusedFindings || 0} previous findings available`;
+    $('statStatus').textContent = 'Complete'; $('statStatus').className = 'success';
+    $('statStatusDetails').textContent = 'Browser testing finished';
+    setRunning(false, 'Complete');
+    $('phaseStatus').textContent = 'Assessment and browser testing finished';
+    if (data.testSummary) {
+      appendLog(`Assessment complete: report.md generated.`, 'success');
+      $('reportBadge').hidden = false;
+      fetch('/api/report').then(r => r.text()).then(text => {
+        $('reportContent').textContent = text;
+        selectTab('Report');
+      }).catch(() => {});
     }
-    if (sourceReport && data.authentication) sourceReport.authentication = data.authentication;
-    selectTab(complete && data.report?.aiUnderstanding ? 'Summary' : 'Activity');
   }
 }
 
 // User prompt buttons
 $('btnPromptProceed').addEventListener('click', async () => {
   $('userPromptBox').hidden = true;
-  appendLog('User approved: reading full codebase...', 'info');
-  $('phaseStatus').textContent = 'Analyzing full codebase…';
-  $('runState').textContent = 'Analyzing';
+  appendLog('User confirmed: Starting live AI test suite in browser...', 'info');
+  $('phaseStatus').textContent = 'Executing tests in browser…';
+  $('runState').textContent = 'Testing browser';
   try {
     await apiRequest('/api/continue', {
       method: 'POST',
@@ -195,8 +215,8 @@ $('btnPromptProceed').addEventListener('click', async () => {
 
 $('btnPromptSkip').addEventListener('click', async () => {
   $('userPromptBox').hidden = true;
-  appendLog('User skipped full codebase reading.', 'info');
-  $('phaseStatus').textContent = 'Full codebase reading skipped.';
+  appendLog('User skipped browser test execution.', 'info');
+  $('phaseStatus').textContent = 'Browser testing skipped.';
   try {
     await apiRequest('/api/continue', {
       method: 'POST',
@@ -212,18 +232,10 @@ $('attackForm').addEventListener('submit', async event => {
   event.preventDefault(); if (running || !streamReady) return;
   const target = $('targetUrl').value.trim();
   try { if (!['http:', 'https:'].includes(new URL(target).protocol)) throw new Error(); } catch { $('formError').textContent = 'Enter a valid HTTP or HTTPS target URL.'; $('formError').hidden = false; return; }
-  const payload = { target, repo: $('repoPath').value.trim() }; const mode = $('authType').value;
-  if (mode === 'authId') { payload.authId = $('authIdInput').value.trim(); }
-  if (mode === 'bearer') payload.bearer = $('bearerInput').value.trim();
-  if (mode === 'cookie') payload.cookie = $('cookieInput').value.trim();
-  if (mode === 'credentials') { payload.email = $('emailInput').value.trim(); payload.password = $('passwordInput').value; }
-  resetResults(); setRunning(true, 'Starting'); selectTab('Activity'); appendLog(`Starting assessment · ${target}`);
+  const payload = { target, repo: $('repoPath').value.trim() };
+  resetResults(); setRunning(true, 'Starting'); selectTab('Activity'); appendLog(`Starting assessment & browser launch · ${target}`);
   try {
     const serverStatus = await apiRequest('/api/status');
-    const capability = 'unified-assessment';
-    if (!serverStatus.capabilities?.includes(capability)) {
-      throw new Error('An older CodeStress server is running. Stop it, run npm run gui again, and refresh this page to use the updated checks.');
-    }
     const data = await apiRequest('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     if (!data.success) throw new Error(data.error || 'Could not start assessment.');
   } catch (error) { fail(error.message); }
@@ -327,13 +339,14 @@ function renderFindings(data) {
 function renderAuthentication(result) {
   lastAuthResult = result;
   const verified = result.status === 'SUCCESS' && result.authenticated === true;
-  const publicMode = result.status === 'PUBLIC' && result.type === 'unauthenticated';
+  const isPending = result.status === 'PENDING';
+  const publicMode = result.status === 'PUBLIC';
   const isFailed = result.status === 'FAILED';
 
-  $('statAuth').textContent = publicMode ? 'Public' : verified ? 'SUCCESS' : isFailed ? 'FAILED' : 'Unverified';
-  $('statAuth').className = verified ? 'success' : isFailed ? 'error-text' : '';
+  $('statAuth').textContent = isPending ? 'Sign in' : publicMode ? 'Public' : verified ? 'SUCCESS' : isFailed ? 'FAILED' : 'Unverified';
+  $('statAuth').className = verified ? 'success' : isFailed ? 'error-text' : isPending ? 'warn' : '';
 
-  let detail = result.detail || (publicMode ? 'No authentication requested.' : 'No session verification evidence was supplied.');
+  let detail = result.detail || (publicMode ? 'Testing under public browser state.' : 'Session verification active.');
   if (result.user) {
     const idVal = result.user.studentId || result.user.id || result.user.username || result.user.email || '';
     if (idVal) {
@@ -341,11 +354,11 @@ function renderAuthentication(result) {
     }
   }
 
-  $('statAuthDetails').textContent = publicMode ? detail : (verified ? 'SUCCESS ✓ — See evidence' : isFailed ? 'FAILED ✗ — See evidence' : 'See authentication evidence below');
-  $('authEvidence').hidden = publicMode;
+  $('statAuthDetails').textContent = isPending ? 'Waiting for sign-in in browser' : publicMode ? detail : (verified ? 'Session verified ✓' : isFailed ? 'Rejected ✗' : 'Session active');
+  $('authEvidence').hidden = !result.evidence || !result.evidence.length;
   $('authEvidenceDetail').textContent = detail;
   $('authEvidenceList').replaceChildren();
   for (const check of result.evidence || []) {
-    const row = document.createElement('li'); row.textContent = `${check.step}: ${check.endpoint} → HTTP ${check.httpStatus}`; $('authEvidenceList').append(row);
+    const row = document.createElement('li'); row.textContent = `${check.step}: ${check.endpoint}`; $('authEvidenceList').append(row);
   }
 }

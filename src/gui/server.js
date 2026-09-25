@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'url';
 import chalk from 'chalk';
 import dotenv from 'dotenv';
@@ -32,7 +33,9 @@ function broadcastLog(data) {
     if (data.type === 'assessment_phase') currentRun.phase = data;
     if (data.type === 'target_reachable') currentRun.target = data;
     if (data.type === 'user_prompt') currentRun.userPrompt = data;
-    if (['reading_progress', 'understanding_progress'].includes(data.type)) currentRun.progress = data;
+    if (data.type === 'browser_ready') currentRun.browser = data;
+    if (data.type === 'report_ready') currentRun.report = data;
+    if (['reading_progress', 'understanding_progress', 'test_start', 'test_result'].includes(data.type)) currentRun.progress = data;
     if (['stage_complete', 'stage_error', 'assessment_complete'].includes(data.type)) {
       currentRun.finished = data;
       currentRun.userPrompt = null;
@@ -63,7 +66,7 @@ app.get('/api/stream', (req, res) => {
   res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
 
   if (currentRun?.active) {
-    for (const event of [currentRun.started, currentRun.target, currentRun.repository, currentRun.auth, currentRun.memory, currentRun.phase, currentRun.userPrompt]) {
+    for (const event of [currentRun.started, currentRun.target, currentRun.browser, currentRun.repository, currentRun.auth, currentRun.memory, currentRun.phase, currentRun.userPrompt]) {
       if (event) res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
   } else if (currentRun?.finished) {
@@ -83,7 +86,7 @@ app.get('/api/stream', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
-    capabilities: ['source-understanding', 'evidence-based-auth', 'automatic-auth-discovery', 'unified-assessment'],
+    capabilities: ['source-understanding', 'selenium-browser-testing', 'interactive-authentication'],
     engine: `Ollama (${process.env.OLLAMA_MODEL || 'gpt-oss:120b'})`,
     model: process.env.OLLAMA_MODEL || 'gpt-oss:120b',
     running: Boolean(currentRun?.active),
@@ -93,22 +96,21 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// One workflow: reachable -> read auth source -> authenticate -> ask user -> full understanding.
+// Main workflow: reachable -> browser launch -> code understanding -> manual auth -> live Selenium tests -> report.md
 app.post('/api/run', async (req, res) => {
   if (currentRun?.active) return res.status(409).json({ error: 'An assessment is already running.' });
-  const { target, repo, authId, bearer, cookie, email, password } = req.body || {};
+  const { target, repo } = req.body || {};
   try {
     const url = new URL(target);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
     parseRepository(repo);
-    for (const value of [authId, bearer, cookie, email, password]) if (value !== undefined && typeof value !== 'string') throw new Error();
-  } catch { return res.status(400).json({ error: 'Enter a valid HTTP(S) target, repository and text credentials.' }); }
-  currentRun = { runId: Date.now(), active: true, continueResolver: null, userPrompt: null };
-  res.json({ success: true, message: 'Assessment initiated' });
-  broadcastLog({ type: 'stage_start', name: 'Assessment' });
+  } catch { return res.status(400).json({ error: 'Enter a valid HTTP(S) target and repository path/URL.' }); }
+  currentRun = { runId: Date.now(), active: true, continueResolver: null, userPrompt: null, assessment: null };
+  res.json({ success: true, message: 'Assessment and browser automation initiated' });
+  broadcastLog({ type: 'stage_start', name: 'Assessment & Browser Testing' });
   try {
-    const result = await new Assessment({
-      target, repo, authId, bearer, cookie, email, password,
+    const assessment = new Assessment({
+      target, repo,
       onEvent: broadcastLog,
       onUserPrompt: async (data) => {
         broadcastLog(data);
@@ -117,12 +119,13 @@ app.post('/api/run', async (req, res) => {
           else resolve(false);
         });
       }
-    }).execute();
+    });
+    currentRun.assessment = assessment;
+    const result = await assessment.execute();
     broadcastLog({ type: 'assessment_complete', data: result });
   } catch (error) {
-    // Do not expose transport errors, request credentials or raw model responses.
     const known = /^(The target could not be reached\.|AI understanding is unavailable\.|AI authentication (plan|planning)|Local repository folder|The local repository path|GitHub (repository|access)|Repository not found\.|Project memory could not be read\.)/.test(error.message || '');
-    broadcastLog({ type: 'stage_error', error: known ? error.message : 'Assessment could not finish. Completed findings remain in project memory. Check the current phase, repository access and Ollama configuration.' });
+    broadcastLog({ type: 'stage_error', error: known ? error.message : 'Assessment could not finish: ' + error.message });
   } finally {
     if (currentRun) {
       currentRun.active = false;
@@ -132,7 +135,7 @@ app.post('/api/run', async (req, res) => {
   }
 });
 
-// User response to "Read full codebase?" prompt
+// User response to manual authentication / start running tests prompt
 app.post('/api/continue', (req, res) => {
   if (!currentRun?.continueResolver) {
     return res.status(409).json({ error: 'No assessment is waiting for user confirmation.' });
@@ -143,6 +146,20 @@ app.post('/api/continue', (req, res) => {
   currentRun.userPrompt = null;
   resolver(proceed);
   res.json({ success: true, proceed });
+});
+
+// Retrieve generated report.md
+app.get('/api/report', async (req, res) => {
+  try {
+    const reportPath = path.resolve('report.md');
+    if (!fs.existsSync(reportPath)) {
+      return res.status(404).json({ error: 'report.md has not been generated yet. Run an assessment to generate it.' });
+    }
+    const content = await fs.promises.readFile(reportPath, 'utf-8');
+    res.type('text/markdown').send(content);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/memory', async (req, res) => {
@@ -202,7 +219,7 @@ export function startGuiServer(port = PORT) {
       console.log('');
       console.log(chalk.bold.green(`🖥️  CodeStress GUI Live Server running at:`));
       console.log(chalk.bold.cyan(`    👉 http://localhost:${port}`));
-      console.log(chalk.gray(`    Engine: Ollama (${process.env.OLLAMA_MODEL || 'gpt-oss:120b'})`));
+      console.log(chalk.gray(`    Engine: Ollama (${process.env.OLLAMA_MODEL || 'gpt-oss:120b'}) + Python Selenium`));
       console.log('');
       resolve(server);
     });

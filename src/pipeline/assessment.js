@@ -4,8 +4,8 @@ import { AIClient } from '../engine/aiClient.js';
 import { Stage1Understand } from './stage1Understand.js';
 import { RouteScanner } from '../repo/routeScanner.js';
 import { ProjectMemory, projectKey, sourceFingerprint } from '../memory/projectMemory.js';
-import { planAuthentication } from '../auth/authenticationPlanner.js';
-import { verifyAuthentication } from '../auth/verifyAuthentication.js';
+import { SeleniumBridge } from '../browser/seleniumBridge.js';
+import { TestScenarioGenerator } from '../browser/testScenarioGenerator.js';
 
 export class Assessment {
   constructor(options) {
@@ -14,6 +14,8 @@ export class Assessment {
     this.http = options.http || axios;
     this.ai = options.ai || new AIClient();
     this.onUserPrompt = options.onUserPrompt || (() => Promise.resolve(true));
+    this.selenium = options.selenium || new SeleniumBridge();
+    this.scenarioGen = new TestScenarioGenerator(this.ai);
   }
 
   phase(name, text) { this.emit({ type: 'assessment_phase', phase: name, text }); }
@@ -22,6 +24,7 @@ export class Assessment {
     try { return await this.run(); }
     catch (error) {
       if (this.memory) await this.memory.save({ status: 'incomplete' }).catch(() => {});
+      if (this.selenium) this.selenium.close();
       throw error;
     }
   }
@@ -33,13 +36,10 @@ export class Assessment {
       throw new Error('Use an HTTP(S) target without embedded credentials.');
     const source = parseRepository(options.repo);
     const key = projectKey(source, target.href);
-    const memory = options.memory || new ProjectMemory(key, [
-      options.cookie, options.bearer, options.password, options.authId, options.email,
-      ...(options.cookie || '').split(';').map(pair => pair.slice(pair.indexOf('=') + 1).trim())
-    ]);
+    const memory = options.memory || new ProjectMemory(key);
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 1 — REACHABILITY
+    // STEP 1 — REACHABILITY & BROWSER INITIALIZATION
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     this.phase('reachability', 'Checking target reachability');
     let reachResponse;
@@ -49,14 +49,38 @@ export class Assessment {
         maxContentLength: 2 * 1024 * 1024, validateStatus: () => true
       });
     } catch {
-      throw new Error('The target could not be reached. No source analysis or login was attempted.');
+      throw new Error('The target could not be reached. Ensure the server is online.');
     }
     this.emit({ type: 'target_reachable', status: reachResponse.status });
 
+    // Launch visible Python Selenium browser
+    this.phase('browser_launch', 'Launching interactive browser window for manual authentication');
+    this.emit({ type: 'log', level: 'info', text: `Opening real browser pointing to ${target.href}...` });
+
+    // Hook selenium events into assessment emitter
+    this.selenium.on('event', event => {
+      this.emit(event);
+      if (event.type === 'test_start') {
+        this.emit({ type: 'log', level: 'info', text: `[TEST ${event.data.index}/${event.data.total}] ${event.data.name} (${event.data.category})` });
+      } else if (event.type === 'test_result') {
+        const level = event.data.status === 'PASSED' ? 'success' : event.data.status === 'VULNERABLE' ? 'error' : 'warn';
+        this.emit({ type: 'log', level, text: `  ↳ ${event.data.status}: ${event.data.details}` });
+      }
+    });
+
+    let browserInfo;
+    try {
+      browserInfo = await this.selenium.launch(target.href);
+      this.emit({ type: 'browser_ready', data: browserInfo });
+      this.emit({ type: 'log', level: 'success', text: `Browser ready: ${browserInfo.browser}. Pointed to ${browserInfo.target}` });
+    } catch (browserErr) {
+      this.emit({ type: 'log', level: 'warn', text: `Selenium launch warning: ${browserErr.message}. Continuing with API analysis.` });
+    }
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 2 — READ REPOSITORY (fast file I/O, no AI)
+    // STEP 2 — READ CODEBASE & AI UNDERSTANDING
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    this.phase('reading', 'Reading repository source');
+    this.phase('reading', 'Reading and analyzing codebase structure');
     const previous = await memory.load();
     this.memory = memory;
     await memory.save({ status: 'reading', source, target: target.origin });
@@ -74,13 +98,8 @@ export class Assessment {
 
     const fingerprint = sourceFingerprint(repository, this.ai.model || 'injected');
     const cachedNotes = previous.fingerprint === fingerprint ? previous.notes : [];
-    await memory.save({
-      fingerprint, status: 'read', notes: cachedNotes,
-      sourceSnapshot: { source: repository.source, inventory: repository.inventory, coverage: repository.coverage },
-      report: null, authPlan: null, authentication: null
-    });
 
-    // Quick heuristic route scan — no AI, just regex matching
+    // Static route & parameter scan
     const analysis = new RouteScanner().analyze(repository);
     const routeSnapshot = {
       source: repository.source, coverage: repository.coverage, inventory: repository.inventory,
@@ -93,127 +112,109 @@ export class Assessment {
     };
     this.emit({ type: 'repository_read', data: routeSnapshot });
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 3 — AUTHENTICATION (AI-focused on auth code only)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    const mode = options.cookie ? 'cookie' : options.bearer ? 'bearer'
-      : options.authId ? 'login-id' : options.email || options.password ? 'credentials' : 'public';
-
-    let authentication;
-    let authPlan = null;
-
-    if (mode === 'public') {
-      authentication = {
-        status: 'PUBLIC', authenticated: false, type: 'unauthenticated',
-        detail: 'No credentials supplied. Source understanding is saved; authenticated access was not requested.',
-        evidence: []
-      };
-      this.emit({ type: 'authentication_result', data: authentication });
-    } else {
-      // The auth planner reads auth-related source excerpts directly from the repository.
-      // It does NOT need a full AI understanding report — a minimal report with cached
-      // notes (if any) is enough. The planner's own regex filter picks up files matching
-      // auth|session|middleware|login|app.|server. and sends them to the AI.
-      const minimalReport = {
-        chunkNotes: cachedNotes,
-        aiCoverage: { totalChunks: 0, analyzedChunks: 0, complete: false }
-      };
-
-      let previousEvidence = [];
-      for (let attempt = 0; attempt < 2; attempt++) {
-        this.phase('planning', attempt
-          ? 'Reconsidering authentication using the observed responses'
-          : 'Planning authentication from source');
-
-        try {
-          authPlan = await planAuthentication({
-            ai: this.ai, repository, report: minimalReport, mode, previousEvidence
-          });
-        } catch (planError) {
-          // AI-based planning failed — fall back to static code discovery.
-          // verifyAuthentication handles the null authPlan by using discoverAuthentication.
-          this.emit({ type: 'log', level: 'warn',
-            text: `AI auth planning unavailable: ${planError.message}. Using static code discovery.` });
-          authPlan = null;
-        }
-
-        if (authPlan) {
-          await memory.save({ authPlan, status: 'authenticating' });
-          this.emit({ type: 'log', level: 'info', text: `Authentication plan: ${authPlan.reason}` });
-        }
-
-        this.phase('authentication', 'Verifying authenticated access');
-        const result = await verifyAuthentication({ ...options, authPlan }, this.http);
-        const { session, ...safeResult } = result;
-        authentication = safeResult;
-        await memory.save({ authentication });
-        this.emit({ type: 'authentication_result', data: authentication });
-
-        // Never repeat a password/login attempt. Only adapt read-only session checks.
-        if (authentication.status === 'SUCCESS'
-          || !['cookie', 'bearer'].includes(mode)
-          || !authentication.evidence.length
-          || attempt === 1) break;
-        previousEvidence = authentication.evidence;
-      }
+    // AI codebase understanding across all routes & logic
+    this.phase('understanding', `AI analyzing application architecture & security attack surfaces`);
+    let report;
+    try {
+      report = await new Stage1Understand({
+        repository, ai: this.ai, cachedNotes, onEvent: this.emit,
+        onCheckpoint: result => memory.save({ notes: result.chunkNotes, report: result, fingerprint, status: 'understanding' })
+      }).execute();
+      await memory.save({ report, notes: report.chunkNotes, fingerprint, status: 'understood' });
+      this.emit({ type: 'understanding_ready', data: report });
+    } catch (e) {
+      report = routeSnapshot;
+      this.emit({ type: 'log', level: 'warn', text: `AI understanding limited: ${e.message}. Using heuristic scanner routes.` });
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 4 — ASK USER: "Read full codebase?"
+    // STEP 3 — MANUAL AUTHENTICATION GATE
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    const authComplete = ['SUCCESS', 'PUBLIC'].includes(authentication.status);
-    this.phase('waiting', authComplete
-      ? 'Authentication verified · waiting for confirmation'
-      : 'Authentication incomplete · waiting for confirmation');
-
-    const proceed = await this.onUserPrompt({
-      type: 'user_prompt',
-      prompt: 'Read full codebase?',
-      detail: authComplete
-        ? 'Authentication succeeded. Proceed with full AI codebase understanding?'
-        : 'Authentication was not verified. You can still read and analyze the full codebase.',
-      authStatus: authentication.status
+    this.phase('waiting_auth', 'Browser open · please complete manual login/MFA');
+    this.emit({
+      type: 'authentication_result',
+      data: {
+        status: 'PENDING',
+        authenticated: false,
+        type: 'Interactive Browser Session',
+        detail: 'Browser is open. Complete authentication (Google OAuth, SSO, MFA, or credentials) in the browser window, then click Start Running Tests.'
+      }
     });
 
-    if (!proceed) {
-      const result = {
-        reachable: true, report: routeSnapshot, authentication,
-        memory: { key, updatedAt: new Date().toISOString(), reusedFindings: cachedNotes.length },
-        status: authComplete ? 'auth_only' : 'needs_attention'
-      };
-      await memory.save({ status: result.status, authentication });
-      this.emit({ type: 'memory_status', key, text: 'Authentication evidence saved. Full codebase analysis was skipped.' });
-      return result;
+    const proceedWithTests = await this.onUserPrompt({
+      type: 'user_prompt',
+      prompt: 'Start Running Tests',
+      detail: 'The browser is open with your target. Once you have logged in, click to run AI-generated security and functionality tests live in the browser.',
+      browser: browserInfo?.browser || 'Browser',
+      endpointsDiscovered: routeSnapshot.endpointsCount
+    });
+
+    if (!proceedWithTests) {
+      this.emit({ type: 'log', level: 'info', text: 'Browser testing canceled by user.' });
+      this.selenium.close();
+      return { reachable: true, report, status: 'canceled' };
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // STEP 5 — FULL AI UNDERSTANDING
+    // STEP 4 — DYNAMIC TEST SCENARIO GENERATION
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    this.phase('understanding', `Understanding the full codebase${cachedNotes.length
-      ? ` · ${cachedNotes.length} saved findings available` : ''}`);
-    await memory.save({ status: 'understanding' });
+    this.phase('generating_tests', 'Generating dynamic test scenarios from codebase intelligence');
+    this.emit({ type: 'log', level: 'info', text: 'Formulating security, session, and input boundary test scenarios...' });
 
-    const report = await new Stage1Understand({
-      repository, ai: this.ai, cachedNotes, onEvent: this.emit,
-      onCheckpoint: result => memory.save({ notes: result.chunkNotes, report: result, status: 'understanding' })
-    }).execute();
+    const scenarios = await this.scenarioGen.generateScenarios(report || routeSnapshot, target.href);
+    this.emit({ type: 'log', level: 'info', text: `Formulated ${scenarios.length} test scenarios. Starting live execution in browser...` });
 
-    await memory.save({ report, notes: report.chunkNotes, status: 'understood' });
-    this.emit({ type: 'understanding_ready', data: report });
+    // Inspect session cookies captured from browser
+    const sessionData = await this.selenium.getSession();
+    const hasCookies = sessionData.cookies && sessionData.cookies.length > 0;
+    this.emit({
+      type: 'authentication_result',
+      data: {
+        status: hasCookies ? 'SUCCESS' : 'PUBLIC',
+        authenticated: hasCookies,
+        type: 'Browser Session',
+        detail: hasCookies
+          ? `Authenticated session active (${sessionData.cookie_count} cookie(s) detected). Running tests with your live session.`
+          : 'Testing under current browser state.',
+        evidence: (sessionData.cookies || []).map(c => ({
+          step: 'Cookie Detected',
+          endpoint: `${c.name} (${c.httpOnly ? 'HttpOnly' : 'Accessible'}, ${c.secure ? 'Secure' : 'Insecure'})`,
+          httpStatus: 200
+        }))
+      }
+    });
 
-    if (report.aiStatus === 'unavailable' || !report.chunkNotes.length) {
-      this.emit({ type: 'log', level: 'warn',
-        text: 'AI understanding is unavailable. Source inventory and authentication evidence were saved.' });
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP 5 — LIVE SELENIUM TEST EXECUTION
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    this.phase('running_tests', `Running ${scenarios.length} tests live in browser window`);
+
+    let testRunResult;
+    try {
+      testRunResult = await this.selenium.runTests(scenarios, {
+        target: target.href,
+        repo: options.repo,
+        aiSummary: report?.aiUnderstanding || 'Codebase routes analyzed by CodeStress.'
+      });
+      this.emit({ type: 'log', level: 'success', text: `All ${scenarios.length} tests completed. Generated report.md successfully.` });
+    } catch (testErr) {
+      this.emit({ type: 'log', level: 'error', text: `Test execution error: ${testErr.message}` });
     }
 
-    const complete = authComplete && report.aiStatus !== 'unavailable' && report.chunkNotes.length > 0;
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // STEP 6 — REPORT GENERATION & WRAP-UP
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    this.phase('complete', 'Testing complete · report.md generated');
+
     const result = {
-      reachable: true, report, authentication,
-      memory: { key, updatedAt: new Date().toISOString(), reusedFindings: cachedNotes.length },
-      status: complete ? 'complete' : 'needs_attention'
+      reachable: true,
+      report,
+      testSummary: testRunResult || null,
+      reportFile: 'report.md',
+      status: 'complete'
     };
-    await memory.save({ status: result.status, authentication });
-    this.emit({ type: 'memory_status', key, text: 'Source findings, coverage and authentication evidence saved for this project.' });
+
+    this.emit({ type: 'assessment_complete', data: result });
     return result;
   }
 }

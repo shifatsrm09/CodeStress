@@ -80,25 +80,35 @@ test('memory invalidates source changes and redacts values without corrupting JS
   assert.deepEqual(JSON.parse(JSON.stringify(redacted)).nested, ['cookie=[redacted]', '[redacted]']);
 });
 
-test('unified assessment authenticates before full understanding and reuses matching notes', async () => {
+test('unified assessment runs browser automation pipeline and generates test report', async () => {
   const calls = [], phases = [], writes = [];
   let sourceRequests = 0;
   const ai = { model: 'fixture', analyzeSource: async instruction => {
-    if (instruction.startsWith('Plan authentication')) return JSON.stringify(plan);
     if (instruction.startsWith('Explain this source')) sourceRequests++;
     return 'app.js:1 uses requireAuth to protect the dashboard and its session.';
   } };
   const memory = { state: { notes: [] }, async load() { return this.state; }, async save(update) { this.state = { ...this.state, ...update }; writes.push(update); } };
-  const options = { target: 'https://example.test', repo: '.', repository, memory, ai, cookie: 'app_session=valid', http: fakeHttp(calls), onEvent: event => {
-    if (event.type === 'assessment_phase') phases.push(event.phase);
-    if (event.type === 'authentication_result') assert.ok(writes.some(write => write.authentication?.status === 'SUCCESS'));
-  } };
+  const mockSelenium = {
+    on: () => {},
+    launch: async () => ({ browser: 'MockBrowser', target: 'https://example.test' }),
+    getSession: async () => ({ cookies: [{ name: 'app_session', value: 'valid', httpOnly: true, secure: true }], cookie_count: 1, storage: {} }),
+    runTests: async () => ({ total: 5, passed: 5, vulnerable: 0, warnings: 0 }),
+    close: () => {}
+  };
+  const options = {
+    target: 'https://example.test', repo: '.', repository, memory, ai,
+    selenium: mockSelenium,
+    http: fakeHttp(calls),
+    onEvent: event => {
+      if (event.type === 'assessment_phase') phases.push(event.phase);
+    }
+  };
   const result = await new Assessment(options).execute();
-  assert.equal(result.authentication.status, 'SUCCESS');
-  assert.deepEqual(phases, ['reachability', 'reading', 'planning', 'authentication', 'waiting', 'understanding']);
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(phases, ['reachability', 'browser_launch', 'reading', 'understanding', 'waiting_auth', 'generating_tests', 'running_tests', 'complete']);
   assert.equal(sourceRequests, 1);
-  assert.ok(writes.some(write => write.report?.aiUnderstanding));
-  assert.ok(!JSON.stringify(writes).includes('app_session=valid'));
+  assert.ok(result.report?.aiUnderstanding);
+  assert.equal(result.testSummary?.passed, 5);
   await new Assessment(options).execute();
   assert.equal(sourceRequests, 1, 'unchanged source notes should be reused');
 });
