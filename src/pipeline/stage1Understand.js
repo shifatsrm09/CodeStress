@@ -1,4 +1,4 @@
-import { AIClient } from '../engine/aiClient.js';
+import { createProvider } from '../engine/provider.js';
 import { RepositoryReader } from '../repo/repositoryReader.js';
 import { RouteScanner } from '../repo/routeScanner.js';
 
@@ -74,7 +74,7 @@ export function discoverTestCommands(repository) {
 export class Stage1Understand {
   constructor(options = {}) {
     this.options = options;
-    this.ai = options.ai || new AIClient();
+    this.ai = createProvider({ ai: options.ai, signal: options.signal });
     this.emit = options.onEvent || (() => {});
     this.maxChunks = options.maxChunks ?? 256;
     this.synthesizeReport = options.synthesizeReport !== false;
@@ -186,9 +186,10 @@ export class Stage1Understand {
     if (!this.synthesizeReport) {
       const summarySnippets = completeFindings.slice(0, 8).map(f => `${f.path}:${f.startLine}: ${f.note}`).join('\n\n');
       result.aiUnderstanding = summarySnippets
-        ? `Codebase security & route analysis complete (${completeFindings.length} findings, ${result.endpointsCount} routes discovered).\n\nKey architectural observations:\n${summarySnippets}`
-        : `Routes analyzed (${result.endpointsCount} endpoints mapped). Ready for live browser security testing.`;
-      result.aiStatus = result.chunkNotes.length ? 'complete' : 'partial';
+        ? `Source findings collected (${completeFindings.length} findings, ${result.endpointsCount} routes discovered).\n\nKey architectural observations:\n${summarySnippets}`
+        : `Routes analyzed (${result.endpointsCount} endpoints mapped). AI understanding is unavailable; browser testing is not ready.`;
+      result.aiStatus = completeFindings.length && result.aiCoverage.complete && repository.coverage.complete ? 'complete' : result.chunkNotes.length ? 'partial' : 'unavailable';
+      if (issues.length) result.error = issues.join('\n');
       result.inventory = result.inventory.map(file => ({ ...file, aiAnalyzed: file.status === 'read' && completed.get(file.path) === perFile.get(file.path) }));
       return result;
     }

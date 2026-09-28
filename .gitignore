@@ -18,7 +18,7 @@
 # misc
 .DS_Store
 *.pem
-
+project-context.md
 # debug
 npm-debug.log*
 yarn-debug.log*
@@ -37,3 +37,7 @@ next-env.d.ts
 
 # Private AI project memory
 .codestress/
+
+# Generated Python caches from the retired adapter
+__pycache__/
+*.pyc

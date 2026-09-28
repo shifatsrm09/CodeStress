@@ -2,7 +2,9 @@ const $ = id => document.getElementById(id);
 let routes = [], eventCount = 0, running = false, streamReady = false, toastTimer;
 let sourceReport = null;
 let lastAuthResult = null;
-const tabs = ['Activity', 'Routes', 'Summary', 'Files', 'Report'];
+const tabs = ['Activity', 'Routes', 'Summary', 'Files', 'Model', 'Tests', 'Report'];
+let currentRunId = null, pendingPrompt = null;
+const testResults = new Map();
 
 async function apiRequest(endpoint, options = {}) {
   let response;
@@ -70,6 +72,7 @@ function setRunning(value, state = 'Idle') {
   running = value; $('configFields').disabled = value; $('btnRun').disabled = value || !streamReady;
   $('btnRun').firstElementChild.textContent = value ? 'Working…' : 'Start assessment';
   $('runState').textContent = state;
+  $('btnCancel').hidden = !value; $('btnLoadRun').disabled = value;
 }
 
 function renderRoutes() {
@@ -92,7 +95,8 @@ function renderRoutes() {
 $('routeSearch').addEventListener('input', renderRoutes);
 
 function resetResults() {
-  lastAuthResult = null; $('authEvidence').hidden = true;
+  lastAuthResult = null; $('authEvidence').hidden = true; pendingPrompt = null; testResults.clear();
+  $('testResults').replaceChildren(); $('scenarioList').replaceChildren(); $('applicationModel').textContent = 'Waiting for source analysis.';
   $('userPromptBox').hidden = true;
   $('reportBadge').hidden = true;
   $('reportContent').textContent = 'Run testing to generate your security assessment report.';
@@ -119,139 +123,140 @@ function fail(message) {
   $('formError').textContent = message; $('formError').hidden = false; appendLog(message, 'error');
 }
 
-function handleStreamEvent(event) {
-  if (event.type === 'authentication_result') renderAuthentication(event.data);
-  if (event.type === 'auth_state_changed' && event.data) {
-    renderAuthentication({
-      status: event.data.authenticated ? 'SUCCESS' : 'PENDING',
-      authenticated: event.data.authenticated,
-      detail: event.data.indicators?.length ? `Signed in · ${event.data.indicators.join(' · ')}` : (event.data.authenticated ? 'Signed in · Active session detected' : 'Waiting for login in browser'),
-      evidence: (event.data.cookies || []).map(c => ({ step: 'Cookie Active', endpoint: `${c.name} (${c.httpOnly ? 'HttpOnly' : 'Accessible'}, ${c.secure ? 'Secure' : 'Insecure'})` }))
-    });
-  }
-  if (event.type === 'target_reachable') {
-    $('statStatus').textContent = 'Reachable'; $('statStatus').className = 'success';
-    $('statStatusDetails').textContent = `HTTP ${event.status}`;
-  }
-  if (event.type === 'browser_ready') {
-    $('statStatusDetails').textContent = `${event.data.browser} Active`;
-    appendLog(`[BROWSER LAUNCHED] ${event.data.browser} open at ${event.data.target}`, 'success');
-  }
-  if (event.type === 'test_start') {
-    setRunning(true, `Running: ${event.data.name}`);
-    $('phaseStatus').textContent = `● Running: ${event.data.name}`;
-    appendLog(`● Running: ${event.data.name} (${event.data.category})`, 'info');
-  }
-  if (event.type === 'test_result') {
-    const level = event.data.status === 'PASSED' ? 'success' : event.data.status === 'VULNERABLE' ? 'error' : 'warn';
-    appendLog(`  ↳ ${event.data.status}: ${event.data.details}`, level);
-  }
-  if (event.type === 'suite_complete') {
-    appendLog(`[SUITE COMPLETE] ${event.data.total} tests executed. Passed: ${event.data.passed}, Issues: ${event.data.issues}`, event.data.issues ? 'warn' : 'success');
-  }
-  if (event.type === 'report_ready') {
-    $('reportBadge').hidden = false;
-    appendLog(`[REPORT READY] report.md compiled (${event.data.total_tests} tests, ${event.data.issues} issues)`, 'success');
-    fetch('/api/report').then(r => r.text()).then(text => {
-      $('reportContent').textContent = text;
-      selectTab('Report');
-      toast('Security report generated');
-    }).catch(() => {});
-  }
-  if (event.type === 'memory_status') $('memoryStatus').textContent = event.text;
-  if (event.type === 'assessment_phase') {
-    $('phaseStatus').textContent = event.text;
-    setRunning(true, event.text);
-    appendLog(event.text);
-  }
-  if (event.type === 'user_prompt') {
-    $('userPromptBox').hidden = false;
-    $('promptTitle').textContent = event.prompt || 'Start Running Tests?';
-    const isAuthed = lastAuthResult && lastAuthResult.authenticated;
-    $('promptDetail').textContent = isAuthed
-      ? '✓ Authentication detected in browser! Click below to execute live browser security tests.'
-      : (event.detail || 'Please complete login/MFA in the Selenium browser. Once logged in, click Start Running Tests.');
-    $('phaseStatus').textContent = isAuthed ? 'Ready to run tests' : 'Browser open · waiting for sign-in…';
-    $('runState').textContent = 'Action required';
-    appendLog(`[ACTION REQUIRED] ${event.prompt}: ${$('promptDetail').textContent}`, 'warn');
-  }
-  if (event.type === 'understanding_coverage' && sourceReport) {
-    sourceReport.aiCoverage = event.data; updateCoverageText(sourceReport);
-  }
-  if (event.type === 'understanding_note' && sourceReport) {
-    sourceReport.chunkNotes.push(event.data); appendSourceFinding(event.data);
-    $('aiText').textContent = 'Reading source. Completed findings appear below; the report will follow.';
-  }
-  if (event.type === 'repository_read' || event.type === 'understanding_ready') renderSourceReport(event.data, true);
-  if (event.type === 'reading_progress') appendLog(`Read ${event.filesRead} source files · ${event.path}`);
-  if (event.type === 'understanding_progress') appendLog(`AI reading chunk ${event.current}/${event.total} · ${event.path}`);
-  if (event.type === 'log') appendLog(event.text, event.level);
-  if (event.type === 'stage_start') { if (!running) resetResults(); setRunning(true, 'Starting'); appendLog(event.name); }
-  if (event.type === 'stage_error') { $('userPromptBox').hidden = true; fail(event.error || 'Assessment failed.'); }
-  if (event.type === 'assessment_complete') {
-    $('userPromptBox').hidden = true;
-    const data = event.data;
-    if (data.report) renderSourceReport(data.report, true);
-    if (data.authentication) renderAuthentication(data.authentication);
-    $('statStatus').textContent = 'Complete'; $('statStatus').className = 'success';
-    $('statStatusDetails').textContent = 'Browser testing finished';
-    setRunning(false, 'Complete');
-    $('phaseStatus').textContent = 'Assessment and browser testing finished';
-    if (data.testSummary) {
-      appendLog(`Assessment complete: report.md generated.`, 'success');
-      $('reportBadge').hidden = false;
-      fetch('/api/report').then(r => r.text()).then(text => {
-        $('reportContent').textContent = text;
-        selectTab('Report');
-      }).catch(() => {});
+function renderModel(model) {
+  $('applicationModel').replaceChildren();
+  for (const [field, facts] of Object.entries(model || {})) {
+    if (!Array.isArray(facts) || !facts.length) continue;
+    const section = document.createElement('section'); const heading = document.createElement('h3'); heading.textContent = field; section.append(heading);
+    for (const fact of facts) {
+      const item = document.createElement('details'); item.className = 'file-entry';
+      const summary = document.createElement('summary'); summary.textContent = typeof fact === 'string' ? fact : `${fact.description} · ${fact.status} (${Math.round(fact.confidence * 100)}%)`;
+      const refs = document.createElement('pre'); refs.textContent = (fact.sourceEvidence || []).map(ref => `${ref.file}:${ref.line} ${ref.quote}`).join('\n');
+      item.append(summary, refs); section.append(item);
     }
+    $('applicationModel').append(section);
   }
 }
-
-// User prompt buttons
-$('btnPromptProceed').addEventListener('click', async () => {
-  $('userPromptBox').hidden = true;
-  appendLog('User confirmed: Starting live AI test suite in browser...', 'info');
-  $('phaseStatus').textContent = 'Executing tests in browser…';
-  $('runState').textContent = 'Testing browser';
-  try {
-    await apiRequest('/api/continue', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proceed: true })
-    });
-  } catch (err) {
-    appendLog(`Confirmation error: ${err.message}`, 'error');
+function renderScenarios(scenarios, container = $('scenarioList')) {
+  container.replaceChildren();
+  for (const scenario of scenarios || []) {
+    const details = document.createElement('details'); details.className = 'file-entry';
+    const summary = document.createElement('summary'); summary.textContent = `${scenario.id} · ${scenario.name} · ${scenario.risk}`;
+    const body = document.createElement('pre'); body.textContent = JSON.stringify({ category: scenario.category, session: scenario.session, preconditions: scenario.preconditions, steps: scenario.steps, expected: scenario.expected, sourceEvidence: scenario.sourceEvidence }, null, 2);
+    details.append(summary, body); container.append(details);
   }
-});
-
-$('btnPromptSkip').addEventListener('click', async () => {
-  $('userPromptBox').hidden = true;
-  appendLog('User skipped browser test execution.', 'info');
-  $('phaseStatus').textContent = 'Browser testing skipped.';
-  try {
-    await apiRequest('/api/continue', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proceed: false })
-    });
-  } catch (err) {
-    appendLog(`Skip error: ${err.message}`, 'error');
+}
+function renderTestResult(result) {
+  testResults.set(result.id, result); $('testResults').replaceChildren();
+  for (const test of testResults.values()) {
+    const details = document.createElement('details'); details.className = 'file-entry test-result';
+    const title = document.createElement('summary'); title.textContent = `${test.status} · ${test.id} · ${test.name}`;
+    const body = document.createElement('pre'); body.textContent = JSON.stringify({ summary: test.explanation || test.summary, expected: test.scenario?.expected, observed: test.checks, error: test.error, actions: test.history, reproduction: test.reproduction, sourceEvidence: test.scenario?.sourceEvidence }, null, 2);
+    details.append(title, body);
+    for (const observation of [...(test.observations || []), ...(test.reproduction?.result?.observations || [])]) {
+      if (!observation.evidenceId || !currentRunId) continue;
+      const row = document.createElement('p'); const link = document.createElement('a');
+      const base = `/api/runs/${encodeURIComponent(currentRunId)}/artifacts/`;
+      link.textContent = `Observation · ${observation.url || ''} · ${observation.timestamp || ''}`;
+      link.href = base + encodeURIComponent(observation.evidenceId + '.json'); link.target = '_blank'; link.rel = 'noopener'; row.append(link); details.append(row);
+      if (observation.screenshot) {
+        const image = document.createElement('img'); image.src = base + encodeURIComponent(observation.screenshot); image.alt = 'Masked browser evidence'; image.loading = 'lazy'; image.className = 'evidence-image'; details.append(image);
+      }
+    }
+    $('testResults').append(details);
   }
+}
+async function loadReport(runId) {
+  if (!runId) return;
+  $('btnDownloadReport').href = `/api/report?runId=${encodeURIComponent(runId)}`;
+  const response = await fetch($('btnDownloadReport').href);
+  if (!response.ok) throw new Error('Report is not available for this run.');
+  $('reportContent').textContent = await response.text(); $('reportBadge').hidden = false;
+}
+async function refreshRuns() {
+  try {
+    const data = await apiRequest('/api/runs'); $('savedRuns').replaceChildren(new Option('Select a saved run', ''));
+    for (const run of data.runs) $('savedRuns').append(new Option(`${run.startedAt} · ${run.target} · ${run.status}`, run.runId));
+  } catch {}
+}
+function handleStreamEvent(event) {
+  if (event.type === 'stage_start') { currentRunId = event.runId; resetResults(); setRunning(true, 'Starting'); appendLog(event.name); }
+  if (event.type === 'authentication_result') renderAuthentication(event.data);
+  if (event.type === 'target_reachable') { $('statStatus').textContent = 'Reachable'; $('statStatus').className = 'success'; $('statStatusDetails').textContent = `HTTP ${event.status}`; }
+  if (event.type === 'browser_ready') appendLog(`Browser opened: ${event.data.browser}`, 'info');
+  if (event.type === 'application_model') renderModel(event.data);
+  if (event.type === 'scenarios_ready') renderScenarios(event.data);
+  if (event.type === 'test_start') { $('phaseStatus').textContent = `Running ${event.data.id} · ${event.data.name}`; appendLog($('phaseStatus').textContent); }
+  if (event.type === 'agent_step') appendLog(`${event.data.testId} · step ${event.data.step}: ${event.data.action}`);
+  if (event.type === 'test_result') { renderTestResult(event.data); appendLog(`${event.data.id}: ${event.data.status}`, event.data.status === 'PASS' ? 'success' : 'warn'); }
+  if (event.type === 'report_ready') { loadReport(event.data.runId).catch(error => appendLog(error.message, 'warn')); refreshRuns(); }
+  if (event.type === 'memory_status') $('memoryStatus').textContent = event.text;
+  if (event.type === 'assessment_phase') { $('phaseStatus').textContent = event.text; setRunning(true, event.text); appendLog(event.text); }
+  if (event.type === 'user_prompt') {
+    pendingPrompt = event; $('userPromptBox').hidden = false;
+    $('promptTitle').textContent = event.prompt; $('promptDetail').textContent = event.detail;
+    $('btnPromptProceed').firstElementChild.textContent = event.kind === 'execution' ? 'Run reviewed tests' : event.kind === 'browser' ? 'Open browser' : 'Verify sign-in';
+    $('executionPermissions').hidden = event.kind !== 'execution'; $('allowMutations').checked = false; $('allowDangerous').checked = false;
+    renderScenarios(event.scenarios, $('promptScenarios')); $('runState').textContent = 'Waiting for you';
+  }
+  if (event.type === 'understanding_coverage' && sourceReport) { sourceReport.aiCoverage = event.data; updateCoverageText(sourceReport); }
+  if (event.type === 'understanding_note' && sourceReport) { sourceReport.chunkNotes.push(event.data); appendSourceFinding(event.data); }
+  if (['repository_read', 'understanding_ready'].includes(event.type)) renderSourceReport(event.data, true);
+  if (event.type === 'reading_progress') appendLog(`Read ${event.filesRead} files · ${event.path}`);
+  if (event.type === 'understanding_progress') appendLog(`Understanding ${event.current}/${event.total} · ${event.path}`);
+  if (event.type === 'log') appendLog(event.text, event.level);
+  if (event.type === 'assessment_complete') {
+    const data = event.data; currentRunId = data.runId || currentRunId; pendingPrompt = null; $('userPromptBox').hidden = true;
+    if (data.report || data.sourceReport) renderSourceReport(data.report || data.sourceReport, true);
+    if (data.applicationModel) renderModel(data.applicationModel);
+    if (data.scenarios) renderScenarios(data.scenarios);
+    if (data.authentication) renderAuthentication(data.authentication);
+    for (const result of data.results || []) renderTestResult(result);
+    setRunning(false, data.status); $('statStatusDetails').textContent = `Assessment: ${data.status}`; $('phaseStatus').textContent = `${data.status} · ${(data.results || []).length} test results saved`;
+    if (data.error) appendLog(data.error.message, 'error');
+    loadReport(currentRunId).catch(() => {}); refreshRuns();
+  }
+}
+async function answerPrompt(proceed) {
+  if (!pendingPrompt) return;
+  $('btnPromptProceed').disabled = $('btnPromptSkip').disabled = true;
+  try {
+    await apiRequest('/api/continue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: pendingPrompt.runId, promptId: pendingPrompt.promptId, proceed, allowMutations: $('allowMutations').checked, allowDangerous: $('allowDangerous').checked }) });
+    pendingPrompt = null; $('userPromptBox').hidden = true;
+  } catch (error) { appendLog(error.message, 'error'); }
+  finally { $('btnPromptProceed').disabled = $('btnPromptSkip').disabled = false; }
+}
+$('btnPromptProceed').addEventListener('click', () => answerPrompt(true));
+$('btnPromptSkip').addEventListener('click', () => answerPrompt(false));
+$('allowMutations').addEventListener('change', () => { if (!$('allowMutations').checked) $('allowDangerous').checked = false; });
+$('btnCancel').addEventListener('click', async () => {
+  try { await apiRequest('/api/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: currentRunId }) }); $('phaseStatus').textContent = 'Canceling and saving completed evidence…'; } catch (error) { appendLog(error.message, 'error'); }
 });
-
+$('authMode').addEventListener('change', () => {
+  document.querySelectorAll('.credential').forEach(group => { group.hidden = !group.dataset.mode.split(' ').includes($('authMode').value); group.querySelectorAll('input').forEach(input => { input.disabled = group.hidden; input.required = !group.hidden && !(input.id === 'passwordInput' && $('authMode').value === 'authId'); }); });
+});
+$('authMode').dispatchEvent(new Event('change'));
 $('attackForm').addEventListener('submit', async event => {
   event.preventDefault(); if (running || !streamReady) return;
-  const target = $('targetUrl').value.trim();
-  try { if (!['http:', 'https:'].includes(new URL(target).protocol)) throw new Error(); } catch { $('formError').textContent = 'Enter a valid HTTP or HTTPS target URL.'; $('formError').hidden = false; return; }
-  const payload = { target, repo: $('repoPath').value.trim() };
-  resetResults(); setRunning(true, 'Starting'); selectTab('Activity'); appendLog(`Starting assessment & browser launch · ${target}`);
+  const payload = { target: $('targetUrl').value.trim(), repo: $('repoPath').value.trim(), upload: $('uploadFixture').value.trim(), authMode: $('authMode').value, replay: $('replayTests').checked };
+  if (payload.authMode === 'cookie') payload.cookie = $('cookieInput').value.trim();
+  if (payload.authMode === 'bearer') payload.bearer = $('bearerInput').value.trim();
+  if (payload.authMode === 'credentials') { payload.username = $('usernameInput').value.trim(); payload.password = $('passwordInput').value; }
+  if (payload.authMode === 'authId') { payload.authId = $('authIdInput').value.trim(); payload.password = $('passwordInput').value; }
+  resetResults(); setRunning(true, 'Starting'); selectTab('Activity');
   try {
-    const serverStatus = await apiRequest('/api/status');
-    const data = await apiRequest('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-    if (!data.success) throw new Error(data.error || 'Could not start assessment.');
+    const status = await apiRequest('/api/status');
+    if (!status.capabilities.includes('source-aware-browser-agent')) throw new Error('Restart CodeStress to load the new workflow.');
+    const result = await apiRequest('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); currentRunId = result.runId;
+    for (const id of ['passwordInput', 'cookieInput', 'bearerInput']) $(id).value = '';
   } catch (error) { fail(error.message); }
 });
+$('btnLoadRun').addEventListener('click', async () => {
+  if (running || !$('savedRuns').value) return;
+  try { const data = await apiRequest(`/api/runs/${encodeURIComponent($('savedRuns').value)}/artifacts/report.json`); resetResults(); handleStreamEvent({ type: 'assessment_complete', data }); selectTab('Tests'); }
+  catch (error) { toast(error.message); }
+});
+refreshRuns();
 
 $('btnClearLogs').addEventListener('click', () => { $('termBody').replaceChildren(); eventCount = 0; $('logCount').textContent = '0 events'; });
 $('btnCopyLogs').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('termBody').innerText); toast('Activity copied to clipboard'); } catch { toast('Clipboard unavailable. Select and copy the activity text.'); } });
@@ -350,37 +355,11 @@ function renderFindings(data) {
 
 function renderAuthentication(result) {
   lastAuthResult = result;
-  const verified = (result.status === 'SUCCESS' || result.status === 'SIGNED_IN') && result.authenticated === true;
-  const isPending = result.status === 'PENDING';
-  const publicMode = result.status === 'PUBLIC';
-  const isFailed = result.status === 'FAILED';
-
-  $('statAuth').textContent = verified ? '✓ Signed in' : isPending ? '◇ Pending' : publicMode ? 'Public' : isFailed ? 'Rejected ✗' : 'Unverified';
-  $('statAuth').className = verified ? 'success' : isFailed ? 'error-text' : isPending ? 'warn' : '';
-
-  let detail = result.detail || (verified ? 'Active authenticated session detected.' : isPending ? 'Please complete login/MFA in the Selenium browser.' : 'Testing under current browser state.');
-  if (result.user) {
-    const idVal = result.user.studentId || result.user.id || result.user.username || result.user.email || '';
-    if (idVal) {
-      detail = `Authenticated as ${idVal} · ${detail}`;
-    }
-  }
-
-  $('statAuthDetails').textContent = verified ? 'Session verified ✓' : isPending ? 'Please complete login/MFA in browser' : detail;
-  $('authEvidence').hidden = !result.evidence || !result.evidence.length;
-  $('authEvidenceDetail').textContent = detail;
+  const verified = result.status === 'SUCCESS' && result.authenticated === true;
+  $('statAuth').textContent = verified ? 'Verified' : result.status === 'PUBLIC' ? 'Public' : result.status === 'FAILED' ? 'Rejected' : 'Unverified';
+  $('statAuth').className = verified ? 'success' : '';
+  $('statAuthDetails').textContent = result.detail || 'No authentication evidence';
+  $('authEvidence').hidden = false; $('authEvidenceDetail').textContent = result.detail || '';
   $('authEvidenceList').replaceChildren();
-  for (const check of result.evidence || []) {
-    const row = document.createElement('li'); row.textContent = `${check.step}: ${check.endpoint}`; $('authEvidenceList').append(row);
-  }
-
-  // Dynamically update prompt box if open
-  if (!$('userPromptBox').hidden) {
-    if (verified) {
-      $('promptDetail').textContent = '✓ Authentication detected in browser! Ready to run security tests.';
-      $('btnPromptProceed').classList.add('glow');
-    } else {
-      $('promptDetail').textContent = 'Please complete login/MFA in the Selenium browser. Once logged in, click Start Running Tests.';
-    }
-  }
+  for (const check of result.evidence || []) { const row = document.createElement('li'); row.textContent = `${check.step}: ${check.endpoint} → HTTP ${check.httpStatus}`; $('authEvidenceList').append(row); }
 }

@@ -1,98 +1,60 @@
 #!/usr/bin/env node
-
 import { Command } from 'commander';
-import chalk from 'chalk';
-import dotenv from 'dotenv';
-import { printBanner } from '../src/cli/banner.js';
-import { Stage0Confirm } from '../src/pipeline/stage0Confirm.js';
+import { createInterface } from 'node:readline/promises';
+import fs from 'node:fs/promises';
+import { Assessment } from '../src/pipeline/assessment.js';
 import { Stage1Understand } from '../src/pipeline/stage1Understand.js';
-
-dotenv.config();
-
+import { renderReport } from '../src/testing/report.js';
 const program = new Command();
-
-program
-  .name('cstress')
-  .description('AI-powered adversarial testing CLI tool — Stress test your logic, not just your server.')
-  .version('1.0.0')
-  .argument('[target]', 'Target application URL (e.g. http://localhost:3000 or https://myapp.com)')
-  .option('--understand', 'Read repository source and produce an AI understanding report')
-  .option('--read-source', 'Read repository inventory without AI or target requests')
-  .option('-g, --gui', 'Launch interactive Web GUI dashboard on port 9999')
-  .option('-p, --port <port>', 'Port for web GUI server', '9999')
-  .option('-r, --repo <path_or_url>', 'Codebase path (local directory) or GitHub repo URL', process.cwd())
-  .option('-t, --token <gh_token>', 'GitHub personal access token for private/rate-limited repos')
-  .option('-c, --cookie <cookie>', 'Session cookie header (e.g. "session=abc123")')
-  .option('-b, --bearer <jwt>', 'Bearer token / JWT')
-  .option('--email <email>', 'Login email for credentialed testing')
-  .option('--password <password>', 'Login password for credentialed testing')
-  .option('--auth-id <code>', 'Single login ID, student ID, access code or username (e.g. 24101128)')
-  .option('--auth-login-path <path>', 'Exact login endpoint on the target', '/api/auth/login')
-  .option('--auth-id-field <field>', 'Override the automatically discovered login ID JSON field')
-  .option('--auth-verify-path <path>', 'Protected current-user GET endpoint for session verification')
-  .option('-o, --output <file>', 'Output report path', 'CODESTRESS.md')
-  .option('-y, --yes', 'Automatically answer yes to confirmation prompts', false)
+program.name('cstress').description('Source-aware application behavior testing').version('1.1.0')
+  .argument('[target]', 'Target application URL')
+  .option('--gui', 'Start the local GUI on port 9999')
+  .option('--port <port>', 'GUI port', '9999')
+  .option('-r, --repo <path>', 'Local folder or public GitHub root', process.cwd())
+  .option('-t, --token <token>', 'GitHub token (prefer GITHUB_TOKEN in the environment)')
+  .option('--upload <path>', 'Explicitly supplied upload fixture, available as fixture')
+  .option('--read-source', 'Read source inventory without AI, browser or target requests')
+  .option('--understand', 'Understand source without opening a browser')
+  .option('--cookie <header>', 'Application session cookie')
+  .option('--bearer <token>', 'Bearer token')
+  .option('--email <email>', 'Account email')
+  .option('--username <name>', 'Account username')
+  .option('--auth-id <id>', 'Login ID')
+  .option('--password <password>', 'Test account password')
+  .option('--public', 'Test only public access')
+  .option('--replay', 'Replay successful tests with a matching source fingerprint')
+  .option('--run-browser', 'Explicitly authorize opening the browser')
+  .option('--execute-tests', 'Explicitly authorize read-only scenario execution')
+  .option('--allow-mutations', 'Authorize reviewed create/update/form actions')
+  .option('--allow-dangerous', 'Also authorize reviewed destructive/payment/messaging actions')
+  .option('-o, --output <file>', 'Write the final Markdown report to this path')
   .action(async (target, options) => {
     try {
-      if (options.understand || options.readSource) {
-        const result = await new Stage1Understand({ repo: options.repo, token: options.token, readOnly: Boolean(options.readSource) }).execute();
-        console.log(JSON.stringify(result, null, 2));
-        if (result.error || !result.coverage.complete || !result.coverage.filesRead) process.exitCode = 1;
-        return;
+      if (options.readSource || options.understand) {
+        const report = await new Stage1Understand({ repo: options.repo, token: options.token, readOnly: Boolean(options.readSource) }).execute();
+        console.log(JSON.stringify(report, null, 2)); return;
       }
-      // If GUI flag is passed or no target provided, start web dashboard
       if (options.gui || !target) {
-        const { startGuiServer } = await import('../src/gui/server.js');
-        const port = parseInt(options.port || process.env.GUI_PORT || '9999', 10);
-        await startGuiServer(port);
-        // Try opening the browser automatically on Windows
-        try {
-          const { exec } = await import('child_process');
-          exec(`start http://localhost:${port}`);
-        } catch (e) {}
-        return;
+        const { startGuiServer } = await import('../src/gui/server.js'); await startGuiServer(Number(options.port)); return;
       }
-      // Print visual banner
-      printBanner({
-        target,
-        repo: options.repo,
-        engine: `IBM Bob 2.0 (${process.env.OLLAMA_MODEL || 'gpt-oss:120b'})`
-      });
-
-      // Normalize target URL
-      if (!/^https?:\/\//i.test(target)) {
-        target = `http://${target}`;
-      }
-
-      // Execute Stage 0: Confirm Target
-      const stage0 = new Stage0Confirm({
-        target,
-        repo: options.repo,
-        token: options.token,
-        cookie: options.cookie,
-        bearer: options.bearer,
-        email: options.email,
-        password: options.password,
-        authId: options.authId,
-        authLoginPath: options.authLoginPath,
-        authIdField: options.authIdField,
-        authVerifyPath: options.authVerifyPath,
-        yes: options.yes
-      });
-
-      const stage0Result = await stage0.execute();
-
-      if (!stage0Result.confirmed) {
-        process.exitCode = stage0Result.authResult?.status === 'PUBLIC' || stage0Result.authResult?.authenticated ? 0 : 1;
-        return;
-      }
-
-      // Next stages will hook in here as we build them out
-      console.log(chalk.cyan('Stage 0 completed successfully.'));
-    } catch (err) {
-      console.error(chalk.bold.red('\n[FATAL ERROR]'), chalk.red(err.message));
-      process.exit(1);
-    }
+      const assessment = new Assessment({ ...options, target, authMode: options.public ? 'none' : options.cookie ? 'cookie' : options.bearer ? 'bearer' : options.authId ? 'authId' : options.username || options.email ? 'credentials' : 'manual', onEvent: event => {
+        if (event.type === 'assessment_phase') console.log(event.text);
+        if (event.type === 'test_result') console.log(`${event.data.id}: ${event.data.status}`);
+      }, onUserPrompt: async prompt => {
+        if ((prompt.kind === 'browser' && options.runBrowser) || (prompt.kind === 'execution' && options.executeTests)) return { proceed: true, allowMutations: Boolean(options.allowMutations), allowDangerous: Boolean(options.allowDangerous) };
+        if (!process.stdin.isTTY) return { proceed: false };
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        const timeout = AbortSignal.timeout(600000);
+        try { const answer = await rl.question(`${prompt.prompt} ${prompt.detail} [y/N] `, { signal: AbortSignal.any([assessment.signal, timeout]) }); return { proceed: /^y(?:es)?$/i.test(answer.trim()), allowMutations: Boolean(options.allowMutations), allowDangerous: Boolean(options.allowDangerous) }; }
+        finally { rl.close(); }
+      } });
+      const cancel = () => assessment.cancel(); process.once('SIGINT', cancel);
+      try {
+        const result = await assessment.execute();
+        console.log(`Run ${result.runId}: ${result.status}`);
+        if (options.output) await fs.writeFile(options.output, renderReport(result), { mode: 0o600 });
+        if (result.status === 'incomplete' || result.results.some(item => item.status === 'FAIL')) process.exitCode = 1;
+      } finally { process.removeListener('SIGINT', cancel); }
+    } catch { console.error('CodeStress could not complete the requested operation. Check configuration and saved run evidence.'); process.exitCode = 1; }
   });
-
-program.parse(process.argv);
+program.parseAsync(process.argv);

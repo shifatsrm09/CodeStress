@@ -1286,3 +1286,13 @@ input:focus,select:focus {
 
 
 
+
+.check-option { display:flex; align-items:flex-start; gap:12px; font-size:15px; line-height:1.6; margin:16px 0; }
+.check-option input { width:20px; height:20px; flex:0 0 auto; margin-top:3px; }
+#applicationModel pre, #scenarioList pre, #testResults pre, #promptScenarios pre { font-size:14px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; padding:12px 0; }
+#applicationModel h3 { font-size:18px; margin:20px 0 10px; }
+.test-result { margin-top:20px; }
+.test-result summary { font-size:17px; }
+.evidence-image { max-width:100%; border:1px solid #38443d; border-radius:6px; margin:10px 0; }
+.report-markdown { font-size:15px; }
+.prompt-panel { animation:none; }

@@ -21,7 +21,7 @@ function identity(data) {
   for (const candidate of candidates) {
     if (!isObject(candidate)) continue;
     const fields = Object.fromEntries(identityFields.filter(key => ['string', 'number'].includes(typeof candidate[key]) && String(candidate[key]).trim()).map(key => [key, candidate[key]]));
-    if (Object.keys(fields).length) return fields;
+    if (Object.keys(fields).length) return { ...fields, ...(typeof candidate.role === 'string' ? { role: candidate.role } : {}) };
   }
   return null;
 }
@@ -82,7 +82,7 @@ export function normalizeCookie(value) {
 
 export async function verifyAuthentication(options, http = axios) {
   const evidence = [];
-  const type = options.bearer ? 'Bearer token' : options.cookie ? 'Session cookie' : options.authId !== undefined && options.authId !== '' ? 'Login ID' : options.email || options.password ? 'Credentials' : 'unauthenticated';
+  const type = options.bearer ? 'Bearer token' : options.cookie ? 'Session cookie' : options.authId !== undefined && options.authId !== '' ? 'Login ID' : options.email || options.username || options.password ? 'Credentials' : 'unauthenticated';
   const outcome = (status, detail, extra = {}) => ({ valid: status === 'SUCCESS' || status === 'PUBLIC', authenticated: status === 'SUCCESS', status, type, detail, error: ['FAILED', 'UNVERIFIED'].includes(status) ? detail : null, evidence, ...extra });
   if (type === 'unauthenticated') return outcome('PUBLIC', 'No authentication requested.');
   const requestOptions = { timeout: 8000, maxRedirects: 0, maxContentLength: 2 * 1024 * 1024, validateStatus: () => true };
@@ -108,9 +108,9 @@ export async function verifyAuthentication(options, http = axios) {
   if (loginUrl) {
     const field = options.authIdField || 'studentId';
     if (!/^[a-zA-Z][\w]{0,63}$/.test(field) || ['__proto__', 'constructor', 'prototype'].includes(field)) return outcome('UNVERIFIED', 'Invalid login ID field name.');
-    if (type === 'Credentials' && (!options.email || !options.password)) return outcome('FAILED', 'Both email and password are required.');
+    if (type === 'Credentials' && (!(options.email || options.username) || !options.password)) return outcome('FAILED', 'Both email and password are required.');
     if (type === 'Credentials' && options.authPlan && (!options.authPlan.emailField || !options.authPlan.passwordField)) return outcome('UNVERIFIED', 'The login request fields could not be determined from source.');
-    const payload = type === 'Login ID' ? { [field]: options.authId } : { [options.authPlan?.emailField || 'email']: options.email, [options.authPlan?.passwordField || 'password']: options.password };
+    const payload = type === 'Login ID' ? { [field]: options.authId, ...(options.password && options.authPlan?.passwordField ? { [options.authPlan.passwordField]: options.password } : {}) } : { [options.authPlan?.emailField || 'email']: options.email || options.username, [options.authPlan?.passwordField || 'password']: options.password };
     let response;
     try { response = await http.post(loginUrl.href, payload, requestOptions); }
     catch { return outcome('UNVERIFIED', 'Login request could not be completed. No session was verified.'); }
@@ -118,19 +118,11 @@ export async function verifyAuthentication(options, http = axios) {
     if ([400, 401, 403, 422].includes(response.status) || denied(response.data)) return outcome('FAILED', 'The login endpoint rejected the supplied input or credentials.');
     if (response.status < 200 || response.status >= 300) return outcome('UNVERIFIED', 'Login did not return a successful API response. Check the configured endpoint; redirects are not followed.');
     if (!isJson(response)) return outcome('UNVERIFIED', 'Login returned a page or non-JSON response. HTTP success alone is not authentication.');
-    if (response.data.firstLogin === true && options.authVerifyPath) return outcome('UNVERIFIED', 'The server returned a first-login/onboarding response. This does not prove an authenticated session.');
+    if (response.data.firstLogin === true) return outcome('UNVERIFIED', 'The server returned a first-login/onboarding response. This does not prove an authenticated session.');
     const token = response.data.token || response.data.accessToken || response.data.access_token;
     if (typeof token === 'string') bearer = token.trim();
     receivedCookies = response.headers?.['set-cookie'];
-    if (!bearer && !cookie && !receivedCookies) {
-      if (!options.authVerifyPath && response.data) {
-        const user = identity(response.data) || (response.data.firstLogin !== undefined ? { [field]: options.authId } : null);
-        if (user) {
-          return outcome('SUCCESS', 'Login endpoint accepted input and authenticated the session.', { user, session: { bearer: '', cookie: '' } });
-        }
-      }
-      return outcome('UNVERIFIED', 'No usable session token or cookie was returned. A user lookup is not session verification.');
-    }
+
   }
   if (!bearer && !cookie && !receivedCookies) return outcome('UNVERIFIED', 'No usable session token or cookie was returned. A user lookup is not session verification.');
   const pastedCookie = cookie;
@@ -179,17 +171,14 @@ export async function verifyAuthentication(options, http = axios) {
       if (authenticated.status < 200 || authenticated.status >= 300 || !isJson(authenticated)) return outcome('UNVERIFIED', 'The authenticated request did not return a successful JSON session response.');
       const user = identity(authenticated.data);
       if (!user) return outcome('UNVERIFIED', 'The verification response did not identify an authenticated user.');
-      const expectedField = type === 'Login ID' ? options.authIdField || 'studentId' : type === 'Credentials' ? 'email' : null;
-      const expectedValue = type === 'Login ID' ? options.authId : options.email;
+      const expectedField = type === 'Login ID' ? options.authIdField || 'studentId' : type === 'Credentials' ? options.username ? options.authPlan?.emailField || 'username' : 'email' : null;
+      const expectedValue = type === 'Login ID' ? options.authId : options.email || options.username;
       if (expectedField && (user[expectedField] === undefined || String(user[expectedField]) !== String(expectedValue))) return outcome('UNVERIFIED', 'The verification response did not match the supplied account identity.');
       return outcome('SUCCESS', 'Protected session endpoint denied anonymous and invalid credentials, then returned the matching authenticated account with the supplied session.', { user, session: { bearer, cookie } });
     };
     lastResult = await check();
     if (lastResult?.status === 'SUCCESS') return lastResult;
     if (options.authVerifyPath) return lastResult || outcome('UNVERIFIED', 'Verification failed on configured endpoint.');
-  }
-  if (!options.authVerifyPath && !options.authPlan && (bearer || cookie || receivedCookies)) {
-    return outcome('SUCCESS', 'Authentication succeeded with active session credentials.', { session: { bearer, cookie } });
   }
   return lastResult || outcome('UNVERIFIED', 'Automatic discovery could not verify a protected current-user endpoint. The session may be expired, the API may use a different origin, or this app may not expose a supported session endpoint.');
 }

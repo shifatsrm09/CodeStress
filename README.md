@@ -1,161 +1,94 @@
 # CodeStress
 Be the first to break your own code.
 
-## One assessment workflow
+CodeStress reads a local repository or public GitHub repository, builds a cited application model, proposes behavior tests, and operates an isolated browser after your approval. It compares explicit expectations with observations and saves evidence and reusable tests.
 
-In the GUI (`npm run gui`, port 9999), supply a target URL, a local repository
-folder or public GitHub root link, and any test credentials. Click **Start assessment**.
-There is no stage selector or separate read-source button in the GUI.
+## Current implementation
 
-The workflow checks target reachability, reads source, builds AI understanding,
-saves its findings, then plans and verifies authentication from the source.
-The AI can request additional file/line ranges from the in-memory source snapshot
-to trace routes, imports, middleware and templates before producing its plan.
-Cookie/token checks can be reconsidered once using observed HTTP evidence;
-password logins are never repeated automatically. Source instructions are untrusted
-and are not executed. Authentication uses bounded HTTP operations, not arbitrary
-AI-generated commands.
+One workflow replaces the stage selector:
 
-**Files** shows read/excluded/skipped/failed entries, hashes and AI coverage.
-**AI summary** shows architecture, business rules and findings with source references.
-The downloadable report includes the completed authentication evidence.
-Incomplete understanding remains clearly marked and is not proof of correctness.
+**Reachability → source → understanding → application model → scenarios → browser approval → authentication → execution approval → observations → comparison → reproduction → report → memory.**
 
-### Project memory workspace
+The dark GUI uses larger text and includes source coverage, application facts, scenario review, authentication evidence, live progress, results, screenshots, and saved reports. There is no special PIN mode; a source-discovered login ID is handled like any other credential.
 
-Each repository and target origin has a local workspace under
-`.codestress/memory/<project-key>/memory.json`. Findings are checkpointed after each
-completed excerpt, then the report, source fingerprint, authentication plan and
-HTTP evidence are saved. The next assessment rereads source and reuses completed
-findings only when the source fingerprint and AI model match. Changed source is
-reanalyzed; old authentication success is never reused as proof of current access.
-The GUI displays saved-memory status when a project is selected.
+This implementation has received source review only. Automated tests and browser execution have not been run during this change, following the project's explicit permission requirement. The commands below are instructions, not claims of successful validation.
 
-Supplied credentials are not part of the saved report or model prompt; known supplied
-secret values are redacted from persisted string values. Ordinary source may still
-contain embedded secrets; source filename exclusions are not a secret scanner.
-The memory directory is excluded from source reading and Git. This is a persistent
-knowledge workspace, **not an OS/container sandbox or command runner**. No tests or
-repository commands run automatically. Raw source is reread on each assessment;
-it is not copied into memory files, though AI notes may quote excerpts.
+## Setup
 
-CLI alternatives (do not require a running GUI or target):
+Use Node.js 22 or later and install dependencies with `npm install`. Configure `.env` for Ollama, for example:
 
-```text
-node bin/cstress.js --read-source --repo "C:/projects/my-app"
-node bin/cstress.js --understand --repo https://github.com/owner/repo
+```dotenv
+AI_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=your-installed-model
 ```
 
-Local relative paths resolve against the CodeStress server's working folder.
-GitHub reads the default branch at one fixed commit, supports `.git` suffixes,
-reads all eligible files within the documented limits, and handles truncated
-recursive trees. Use a root repository link; branch/file links are rejected.
-Public repos do not require a token, but anonymous GitHub API rate limits can
-interrupt larger reads. Configure `GITHUB_TOKEN` to raise the available limit;
-failed reads remain visible and the result is marked partial.
+For Ollama cloud, use `OLLAMA_BASE_URL=https://ollama.com`, an available cloud model, and `OLLAMA_API_KEY`. Source excerpts and sanitized browser observations are sent to the configured provider; cloud mode is not local-only processing. `OLLAMA_ANALYSIS_OUTPUT_TOKENS` controls source response size (1024–8192, default 4096), with one larger-output retry.
 
-### AI configuration and coverage
+The browser uses installed Microsoft Edge by default. Set `BROWSER_CHANNEL=chromium` to use Playwright Chromium, which must first be installed with `npx playwright install chromium`. Installing the JavaScript dependency alone does not install or launch a browser in this workspace.
 
-Set `OLLAMA_BASE_URL` (for example `http://localhost:11434`) and `OLLAMA_MODEL`
-for local Ollama. For Ollama Cloud, set `OLLAMA_API_KEY` (or `OLLAMA_API`) and
-use `https://ollama.com`. Localhost Ollama does not require an API key.
-AI errors are reported explicitly; Stage 1 never replaces them with a heuristic
-report. Read-only inventory remains useful even when the AI is unavailable.
+With permission to start the GUI:
 
-Defaults: 2,000 files, 512 KiB per file, 20 MiB total source, and 256 source chunks
-for AI analysis. Limit hits and unreadable files are reported, not silently dropped.
-Every admitted source file is split into line-numbered chunks. Findings are reduced
-in groups for the final synthesis; original chunk notes remain in the JSON report.
-An AI-coverage count means source was submitted and a response received, not proof
-of perfect comprehension or a security assessment. Final synthesis uses summaries,
-not every source byte at once. Review cited findings before planning tests.
+```powershell
+npm run gui
+```
 
-The reader includes supported UTF-8 source languages, tests, manifests, schemas,
-configuration and documentation. Dependency/build directories, binaries, lockfiles,
-minified files, symlinks, submodules, environment files and known credential filenames
-are excluded. Directory exclusions represent whole subtrees. Local `.gitignore`
-patterns are not applied; inspect the inventory. Filename exclusions cannot detect
-secrets embedded in ordinary source files. AI analysis transmits eligible source to
-the configured provider. Local files are read sequentially; unlike GitHub's commit
-snapshot, a local folder can change during reading. File hashes identify what was read.
+Open http://localhost:9999. The server binds to the local computer only. Enter the target URL, local repository path or public GitHub repository URL, and authentication mode. A run checks reachability and analyzes source immediately; browser launch and test execution each require an explicit decision. Form interactions default to disabled. Destructive, payment, messaging and integration actions require an additional permission.
 
-Route counts are heuristic matches, currently oriented toward Express-style routes;
-they do not measure the AI's support for other languages. A partial or unavailable
-report should not be treated as readiness to run adversarial tests.
+An optional local file path supplies a regular upload fixture of at most 5 MB under the ID `fixture`. Only explicitly supplied fixtures can be uploaded, and upload scenarios require mutation permission.
 
-## Validation
+## Authentication and scope
 
-Repository-reader and Stage 1 tests are in `test/repository-understanding.test.js`.
-They use temporary local folders, a mocked GitHub API and a mocked AI; no public
-repository or external AI is contacted. Run `npm test` only when authorized.
-PIN authentication has been removed. Cookie, bearer, Login ID and email/password inputs remain.
+Supported inputs are a pasted session cookie, bearer token, username/email and password, login ID, public access, or manual browser sign-in. Protected endpoints and supported JSON login fields are discovered from source. There are no endpoint or raw login-request fields to fill in.
 
-### Recovering from AI output limits
+Verification compares authenticated access with anonymous and invalid-session controls. Source-backed browser checks provide a fallback for supported HTML-protected pages. A cookie existing, a redirect, a profile-looking element, or a successful credential POST alone does not prove access. Unsupported or inconclusive flows remain unverified and protected tests are skipped.
 
-Source excerpts are approximately 6,000 characters. Each request starts with a
-4,096-token output allowance and retries once at 8,192 tokens if Ollama explicitly
-reports truncation. Set `OLLAMA_ANALYSIS_OUTPUT_TOKENS` to an integer from 1,024 to
-8,192 to override the starting budget; the retry doubles it. Context is configured
-at 32,768 tokens, subject to the model/provider's supported context size. GPT-OSS
-models use `think: low`; other model families keep their default reasoning settings.
-A finished answer is no longer rejected just for exceeding 12,000 characters.
+Google OAuth, MFA, CAPTCHA and similar challenges are completed manually in the visible browser. CodeStress does not bypass them. Credentials and browser state stay in memory; reports contain sanitized evidence. Browser actions stay within the target origin. Separate API origins are currently blocked rather than guessed or implicitly trusted.
 
-Source chunks that still truncate are split into smaller line-numbered excerpts,
-up to two subdivision levels. Completed findings are kept; irrecoverable excerpts
-are labeled incomplete and other source chunks continue. Provider/configuration
-failures stop further requests. Only completed findings feed the synthesis. The
-final report is generated in four separate sections, retaining any earlier sections
-if a later one fails. Individual source findings, including clearly marked partial
-answer text, appear in the GUI and downloadable JSON. Reasoning traces are not saved.
-Unified GUI assessments checkpoint these findings into project memory. Standalone
-CLI source-analysis runs retain their existing downloadable/printed report behavior.
+## Results and memory
 
-### From understanding to execution
+Each scenario receives PASS, FAIL, UNCERTAIN, BLOCKED or SKIPPED. PASS only means its explicit checks matched. FAIL means an observed behavior contradicted the specified expectation; source-derived expectations still need human review. Unknown network results, failed actions, missing roles and denied permissions must not become a pass.
 
-Stage 1 discovers test/lint/check scripts declared in `package.json`, including
-pre/post lifecycle hooks and each package's directory. These are proposals to review,
-not trusted or executed commands. `execution.supported` is currently `false` and
-all proposals remain `not_run`. A command runner is a separate future component:
-review and approve the command and directory, run with resource/time limits in an
-isolated checkout, collect exit status and output, and connect findings to actual
-results. Static analysis alone never proves a test has passed.
+Read-only failures can be replayed in a fresh browser context, with reproduction status recorded separately. This resets client state, not server state. Mutation failures are not automatically replayed without a safe reset strategy. Findings do not automatically claim a security vulnerability or severity.
 
-Recovery checks are in `test/ai-analysis-recovery.test.js` and
-`test/repository-understanding.test.js`; all AI responses are mocked. These checks
-must not be run without the user's permission.
+Artifacts live in `.codestress/runs/<run-id>/`: JSON and Markdown reports, observation JSON and masked viewport screenshots. Project memory stores source fingerprints, completed source notes, the application model, tests, results and failures. Passing scenarios can be replayed only with a matching source/model fingerprint. Changed source requires fresh analysis. This is application-managed memory, not an assumption that Ollama remembers prior conversations.
 
-## Authentication evidence
+Known credentials, cookie/storage tokens and sensitive fields are redacted or masked. Screenshots and application content may still contain personal or confidential information that cannot be recognized automatically; inspect artifacts before sharing them.
 
-The unified GUI uses an AI plan grounded in exact source lines, rather than a fixed
-list of guessed `/api/me` endpoints. The planner can reread up to six file ranges
-per round for three rounds. Only same-origin HTTP paths and supported operations
-are admitted. Source citations must match the actual snapshot. Login path and
-request fields are discovered automatically; ambiguous or unsupported plans stop
-without submitting credentials. No AI-generated shell commands are executed.
+## Command line
 
-For JSON session routes, verification requires anonymous and invalid credentials
-to be rejected, then a successful JSON response identifying the signed-in user.
-For source-backed protected HTML pages, anonymous and invalid sessions must receive
-401/403 or a redirect to the identified same-origin login path; the real session
-must return HTTP 200 HTML with a source-backed authenticated-content marker.
-HTML verification proves protected access, not independently verified account identity.
-Public SPA shells do not pass this check. Redirects are observed, never followed.
-Credentials are not sent to another origin or automatically guessed backend port.
+```powershell
+node bin/cstress.js --read-source --repo "C:\path\to\repository"
+node bin/cstress.js --understand --repo https://github.com/owner/repository
+node bin/cstress.js http://localhost:3000 --repo "C:\path\to\repository" --public
+```
 
-OAuth uses the application's existing session cookie/token. Repository access cannot
-complete Google consent, MFA or CAPTCHA. Fresh OAuth sign-in, client-side browser
-flows, CSRF-dependent form submissions and separate API origins may require additional
-integration; the current runner reports these limits rather than inventing success.
-A repo and credentials enable discovery but do not guarantee every app can be logged in.
+Target assessments prompt before browser launch and execution. Noninteractive runs decline unless `--run-browser` and `--execute-tests` are supplied. Mutation and dangerous actions require their respective flags. `--replay` uses compatible passing scenarios; `--upload <path>` supplies the fixture; `--output <file>` exports Markdown. Prefer environment configuration for secrets; command-line secrets may remain in shell history. `GITHUB_TOKEN` or `--token` is available for repository access.
 
-For cookies, paste request `name=value; other=value` pairs or the full `Cookie:`
-header. Do not paste a Set-Cookie response or browser cookie table. Encoded values
-and embedded equals signs are preserved. Real cookies are sent to discovered
-candidates only after anonymous and invalid-cookie controls reject access.
-HTTP 200 alone, onboarding responses and public account lookups never prove login.
+## Architecture and limits
 
-Legacy CLI Stage 0 retains its heuristic discovery and optional overrides
-`--auth-login-path`, `--auth-id-field`, and `--auth-verify-path`.
-Source-only CLI commands remain available. The GUI always uses the unified workflow.
-Regression cases are in `test/unified-assessment.test.js` and
-`test/auth-verification.test.js`; they use mocks and must not run without permission.
+- `src/repo`, `src/pipeline/stage1Understand.js`: bounded repository reading, chunk analysis, coverage and resumable notes.
+- `src/model`: cited, confidence-labelled application model. Source assertions remain inferred, not runtime-confirmed.
+- `src/engine/provider.js`: common generation and validated JSON interface. Ollama is the installed transport; another provider requires an adapter. No IBM Bob integration is claimed.
+- `src/browser`: Playwright contexts, validated action tools, scope/risk enforcement and observations. AI cannot submit arbitrary JavaScript or shell commands.
+- `src/testing`: scenario planning, bounded execution/recovery, deterministic checks, safe reproduction and reports.
+- `src/auth`, `src/memory`, `src/pipeline/assessment.js`: authentication, persistent state and unified orchestration shared by CLI and GUI.
+
+The agent is limited to five scenarios, 20 action attempts and three minutes per scenario, 12 model requests per scenario, two action recoveries, and repeated-action/state limits. Manual prompts expire after ten minutes; the assessment has a one-hour cancellation limit. Partial evidence is checkpointed. Source/context limits are reported; reading a large repository does not imply complete understanding.
+
+This is browser-context isolation, not an OS/container sandbox. It does not execute repository commands, install target dependencies, reset databases, automatically create test accounts or prove arbitrary business invariants. Browser observations include DOM/text, controls, URL, network status metadata and error occurrence; raw response bodies and console payloads are intentionally excluded. Risk classification is conservative heuristics, not a guarantee that an arbitrary application's GET routes have no side effects.
+
+## Validation pending permission
+
+Unit tests cover authentication controls, source handling, JSON repair, action validation, incomplete evidence, memory and agent limits. The opt-in browser integration fixture exercises the shared pipeline with a real browser, deterministic AI responses, verified cookie authentication, a passing route, an intentionally broken route, reproduction and artifacts. It does not validate live Ollama quality or an external OAuth provider.
+
+After permission, run:
+
+```powershell
+npm test
+$env:CODESTRESS_E2E='1'
+node --test test/browser-e2e.test.js
+Remove-Item Env:CODESTRESS_E2E
+```
+
+The second command starts the disposable fixture server and opens a browser. Keep it opt-in. Validate the GUI and a real Ollama assessment separately after approval. See `docs/implementation-audit.md` for the original issues and replacement rationale.

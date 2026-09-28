@@ -24,9 +24,16 @@ If you need more context, return ONLY {"read":[{"file":"exact repository path","
   let plan;
   const context = { notes: notes.map(({ path, startLine, note }) => `${path}:${startLine} ${note}`).join('\n').slice(0, 12000), files: repository.files.map(file => file.path).join('\n').slice(0, 18000), excerpts: collected, previousEvidence, coverage: repository.coverage, aiCoverage: report.aiCoverage };
   for (let round = 0; round < 4; round++) {
-    const answer = await ai.analyzeSource(instruction + (round === 3 ? '\nReading budget exhausted; return the final plan with explicit unknowns.' : ''), JSON.stringify(context));
-    try { plan = JSON.parse(answer.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
-    catch { throw new Error('AI authentication plan was not valid JSON. No login actions were taken.'); }
+    const prompt = instruction + (round === 3 ? '\nReading budget exhausted; return the final plan with explicit unknowns.' : '');
+    if (ai.structuredGenerate) plan = await ai.structuredGenerate(prompt, context, value => {
+      if (!value || typeof value !== 'object' || (!Array.isArray(value.read) && !['session', 'json-login', 'oauth', 'unsupported'].includes(value.kind))) throw new Error('Invalid plan');
+      return value;
+    });
+    else {
+      const answer = await ai.analyzeSource(prompt, JSON.stringify(context));
+      try { plan = JSON.parse(answer.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
+      catch { throw new Error('AI authentication plan was not valid JSON. No login actions were taken.'); }
+    }
     if (!Array.isArray(plan?.read)) break;
     if (round === 3) throw new Error('AI authentication planning reached its source-reading budget. No login actions were taken.');
     const retrieved = [];

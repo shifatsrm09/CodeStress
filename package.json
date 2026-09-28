@@ -1,8 +1,8 @@
 {
   "name": "codestress",
   "version": "1.0.0",
-  "description": "Adversarial testing CLI tool built for IBM Bob 2.0 Hackathon - Stress test your logic, not just your server.",
-  "main": "src/index.js",
+  "description": "Source-aware AI application behavior testing with evidence",
+  "main": "src/gui/server.js",
   "bin": {
     "cstress": "./bin/cstress.js"
   },
@@ -30,9 +30,8 @@
     "chalk": "^5.4.1",
     "cli-progress": "^3.12.0",
     "commander": "^13.1.0",
-    "dotenv": "^16.4.7"
-  },
-  "devDependencies": {
+    "dotenv": "^16.4.7",
+    "playwright": "^1.63.0",
     "express": "^4.21.2"
   }
 }
